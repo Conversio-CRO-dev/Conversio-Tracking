@@ -1,8 +1,6 @@
 //<script>
 // CONVERSIO TAG | Client: XXXXXX : version 2.1 - updated 26-05-2026
 // Copyright Conversio Ltd. 2026 - Use permitted only under licence.
-//THis is a github test
-// ---- THIS IS A RUNTIME LIBRARY, DO NOT EDIT UNLESS YOU KNOW WHAT YOU ARE DOING ----
 (function () {
   'use strict';
 
