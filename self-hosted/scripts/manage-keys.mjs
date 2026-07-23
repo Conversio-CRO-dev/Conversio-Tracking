@@ -6,14 +6,22 @@
 //   node manage-keys.mjs issue --client "Acme Co" [--version 2.2] [--domains acme.com,www.acme.com]
 //   node manage-keys.mjs revoke <key>
 //   node manage-keys.mjs activate <key>
+//   node manage-keys.mjs update <key> [--client ...] [--version ...] [--domains ...]
+//   node manage-keys.mjs verify <key>
 //   node manage-keys.mjs show <key>
 //   node manage-keys.mjs list
+//
+// Optional env vars CF_API_TOKEN + CF_ZONE_ID (see README) enable an active
+// cache purge after revoke/activate/update, so the change takes effect in
+// seconds instead of waiting out the edge cache. Without them, everything
+// still works, just with the slower default propagation.
 
 import { randomBytes } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 
 const NAMESPACE_BINDING = 'CLIENT_KEYS';
 const WRANGLER_CONFIG = new URL('../wrangler.toml', import.meta.url).pathname;
+const LOADER_ORIGIN = 'https://tag.conversio.dev';
 
 function wrangler(args) {
   return execFileSync('npx', ['wrangler', ...args, '--config', WRANGLER_CONFIG], {
@@ -47,6 +55,31 @@ function kvGet(key) {
   }
 }
 
+async function purgeUrl(key) {
+  const token = process.env.CF_API_TOKEN;
+  const zoneId = process.env.CF_ZONE_ID;
+  if (!token || !zoneId) {
+    console.log('(CF_API_TOKEN/CF_ZONE_ID not set, skipping cache purge - change will take effect within the edge cache TTL instead)');
+    return;
+  }
+
+  const res = await fetch(`https://api.cloudflare.com/client/v4/zones/${zoneId}/purge_cache`, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${token}`,
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify({ files: [`${LOADER_ORIGIN}/t/${key}.js`] })
+  });
+
+  const body = await res.json();
+  if (!body.success) {
+    console.error('Cache purge failed:', JSON.stringify(body.errors));
+    return;
+  }
+  console.log('Cache purged, change is effective immediately.');
+}
+
 function cmdIssue(argv) {
   const flags = parseFlags(argv);
   if (!flags.client) {
@@ -68,11 +101,14 @@ function cmdIssue(argv) {
 
   console.log('Key issued for', flags.client);
   console.log(key);
+  if (!flags.domains) {
+    console.log('(no --domains set - this key will work from any site if it leaks; add one later with `update` if that matters for this client)');
+  }
   console.log('\nGTM Custom HTML tag content:\n');
-  console.log(`<script src="https://tag.conversio.dev/t/${key}.js" async></script>`);
+  console.log(`<script src="${LOADER_ORIGIN}/t/${key}.js" async></script>`);
 }
 
-function cmdRevoke(argv) {
+async function cmdRevoke(argv) {
   const key = argv[0];
   if (!key) { console.error('Usage: revoke <key>'); process.exit(1); }
 
@@ -82,9 +118,10 @@ function cmdRevoke(argv) {
   record.status = 'revoked';
   kvPut(key, record);
   console.log('Revoked key for', record.client);
+  await purgeUrl(key);
 }
 
-function cmdActivate(argv) {
+async function cmdActivate(argv) {
   const key = argv[0];
   if (!key) { console.error('Usage: activate <key>'); process.exit(1); }
 
@@ -94,9 +131,10 @@ function cmdActivate(argv) {
   record.status = 'active';
   kvPut(key, record);
   console.log('Activated key for', record.client);
+  await purgeUrl(key);
 }
 
-function cmdUpdate(argv) {
+async function cmdUpdate(argv) {
   const [key, ...flagArgv] = argv;
   if (!key) { console.error('Usage: update <key> [--client "Acme Co"] [--version 2.2] [--domains a.com,b.com]'); process.exit(1); }
 
@@ -111,6 +149,7 @@ function cmdUpdate(argv) {
   kvPut(key, record);
   console.log('Updated key for', record.client);
   console.log(JSON.stringify(record, null, 2));
+  await purgeUrl(key);
 }
 
 function cmdShow(argv) {
@@ -132,16 +171,40 @@ function cmdList() {
   }
 }
 
+async function cmdVerify(argv) {
+  const key = argv[0];
+  if (!key) { console.error('Usage: verify <key>'); process.exit(1); }
+
+  const url = `${LOADER_ORIGIN}/t/${key}.js`;
+  const res = await fetch(url);
+  const body = await res.text();
+
+  if (res.status === 200 && body.startsWith('// CONVERSIO TAG')) {
+    const versionLine = body.split('\n')[0];
+    console.log(`OK - serving the runtime bundle (${versionLine.replace('// ', '')})`);
+    return;
+  }
+
+  if (res.status === 429) {
+    console.log('RATE LIMITED - this key has exceeded its request cap, check for abuse or raise the limit in wrangler.toml');
+    return;
+  }
+
+  console.log(`NOT SERVING - status ${res.status}, body: ${body.trim()}`);
+  console.log('Check the key exists, is active, and (if domain-locked) that you are testing from an allowed origin.');
+}
+
 const [, , command, ...rest] = process.argv;
 
 switch (command) {
   case 'issue': cmdIssue(rest); break;
-  case 'revoke': cmdRevoke(rest); break;
-  case 'activate': cmdActivate(rest); break;
-  case 'update': cmdUpdate(rest); break;
+  case 'revoke': await cmdRevoke(rest); break;
+  case 'activate': await cmdActivate(rest); break;
+  case 'update': await cmdUpdate(rest); break;
+  case 'verify': await cmdVerify(rest); break;
   case 'show': cmdShow(rest); break;
   case 'list': cmdList(); break;
   default:
-    console.error('Unknown command. Use: issue | revoke | activate | update | show | list');
+    console.error('Unknown command. Use: issue | revoke | activate | update | verify | show | list');
     process.exit(1);
 }
