@@ -1,0 +1,23 @@
+name = "conversio-tag-loader"
+main = "src/index.js"
+compatibility_date = "2026-07-01"
+
+# Serves the static bundles in ./public (e.g. runtime-tag.2.2.js) under the
+# ASSETS binding used by src/index.js. Requests that don't match a key are
+# handled entirely by the Worker, so run_worker_first stays on.
+[assets]
+directory = "./public"
+binding = "ASSETS"
+run_worker_first = true
+
+# Create with: wrangler kv namespace create CLIENT_KEYS
+# Then paste the returned id below.
+[[kv_namespaces]]
+binding = "CLIENT_KEYS"
+id = "f5e336ebb4a54c6484b00c08de29ef86"
+
+# Custom Domains map the whole hostname to this Worker (no path wildcards
+# allowed here) - path routing for /t/<key>.js happens inside src/index.js.
+[[routes]]
+pattern = "tag.conversio.dev"
+custom_domain = true
