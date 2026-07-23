@@ -21,3 +21,22 @@ id = "f5e336ebb4a54c6484b00c08de29ef86"
 [[routes]]
 pattern = "tag.conversio.dev"
 custom_domain = true
+
+# Caps requests per client key to a circuit-breaker level, not a normal-traffic
+# level - this exists so a scraped/abused key can't run up request costs or
+# degrade service for every other client sharing this Worker. period must be
+# 10 or 60 (a Workers platform constraint). Tune `limit` to comfortably clear
+# your busiest real client's peak traffic; 3000/60s (~50 req/s sustained) is
+# a starting point, not a measured value.
+[[ratelimits]]
+name = "RATE_LIMITER"
+namespace_id = "1001"
+
+  [ratelimits.simple]
+  limit = 3000
+  period = 60
+
+# Enables Cloudflare Workers Logs (dashboard-visible, queryable, and required
+# for `wrangler tail` to show anything beyond the current terminal session).
+[observability]
+enabled = true

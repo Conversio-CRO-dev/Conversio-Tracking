@@ -13,9 +13,18 @@
 //     "version": "2.2",              // which bundle in /public to serve
 //     "domains": ["acme.com"]        // optional origin allow-list
 //   }
+//
+// RATE_LIMITER binding: caps requests per key (see wrangler.toml), so a
+// leaked/scraped key can't be used to run up request costs or degrade
+// service for every other client sharing this Worker.
 
 var KEY_PATTERN = /^\/t\/([A-Za-z0-9_-]{16,64})\.js$/;
 var DEFAULT_VERSION = '2.2';
+
+function log(reason, fields) {
+  var entry = Object.assign({ event: 'conversio_loader', reason: reason }, fields || {});
+  console.log(JSON.stringify(entry));
+}
 
 function emptyScriptResponse() {
   return new Response('// conversio: inactive\n', {
@@ -23,6 +32,16 @@ function emptyScriptResponse() {
     headers: {
       'content-type': 'application/javascript; charset=utf-8',
       'cache-control': 'public, max-age=30'
+    }
+  });
+}
+
+function rateLimitedResponse() {
+  return new Response('// conversio: rate limited\n', {
+    status: 429,
+    headers: {
+      'content-type': 'application/javascript; charset=utf-8',
+      'cache-control': 'no-store'
     }
   });
 }
@@ -52,7 +71,10 @@ async function serveBundle(request, env, version) {
   var assetUrl = new URL('/runtime-tag.' + version + '.js', request.url);
   var asset = await env.ASSETS.fetch(new Request(assetUrl, request));
 
-  if (!asset.ok) return emptyScriptResponse();
+  if (!asset.ok) {
+    log('asset_missing', { version: version });
+    return emptyScriptResponse();
+  }
 
   var body = await asset.text();
   return new Response(body, {
@@ -75,15 +97,31 @@ export default {
     }
 
     var key = match[1];
+
+    if (env.RATE_LIMITER) {
+      var rateLimit = await env.RATE_LIMITER.limit({ key: key });
+      if (!rateLimit.success) {
+        log('rate_limited', { key: key });
+        return rateLimitedResponse();
+      }
+    }
+
     var record = await env.CLIENT_KEYS.get(key, { type: 'json' });
 
-    if (!record || record.status !== 'active') {
+    if (!record) {
+      log('unknown_key', { key: key });
+      return emptyScriptResponse();
+    }
+
+    if (record.status !== 'active') {
+      log('revoked_key', { key: key, client: record.client });
       return emptyScriptResponse();
     }
 
     if (record.domains && record.domains.length) {
       var hostname = hostnameFromRequest(request);
       if (!domainAllowed(hostname, record.domains)) {
+        log('domain_mismatch', { key: key, client: record.client, hostname: hostname });
         return emptyScriptResponse();
       }
     }
