@@ -197,10 +197,21 @@ buys easy revocation and one place to fix bugs, at the cost of these:
 
 - **Ad blockers and privacy tools may target the subdomain.** A dedicated
   hostname with "tag" in the name is a more obvious blocklist target than
-  code pasted inline into a client's own GTM container. Worth testing
-  `tag.conversio.dev` against uBlock Origin / Brave / common corporate
-  proxies before a wide rollout, and reconsidering the name if it's getting
-  caught.
+  code pasted inline into a client's own GTM container.
+
+  Checked as of 2026-07-24: `tag.conversio.dev` does not appear in any of
+  uBlock Origin's default lists (EasyList, EasyPrivacy, Peter Lowe's list,
+  or uBlock's own filters/privacy/badware/resource-abuse lists). These
+  lists block by exact domain, not by a generic `tag.*` pattern, there are
+  roughly 30 individually-listed `tag.<company>.<tld>` domains in
+  EasyPrivacy today (e.g. `tag.brandcdn.com`, `tag.flagship.io`), almost
+  certainly other companies running the same shared third-party
+  tag-loader architecture as this one, each added only after maintainers
+  noticed and flagged it. So this is a "clean today" result, not a
+  permanent guarantee, worth rechecking every few months or if client-side
+  tracking volume unexpectedly drops, rather than assuming it stays clean
+  indefinitely. Also worth testing against Brave's built-in blocking and
+  common corporate proxies, which weren't covered by this check.
 
 - **Single point of operational control.** Right now, only whoever has
   `wrangler login` access on their machine can issue or revoke keys, there's
