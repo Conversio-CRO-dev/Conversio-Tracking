@@ -240,6 +240,15 @@ gtag.js under a custom dataLayer name, and otherwise queues the command on
 `dataLayer` where gtag.js picks it up when it initialises. So a send firing
 before GA has loaded still arrives rather than being lost.
 
+**`conversio_cro` is an ordinary event, not a conversion.** Nothing in the
+payload marks it as one, and GA4 has no parameter that could. If it shows up as
+a conversion (a "key event") in a client's property, that's the per-property
+toggle in **Admin → Data display → Events**, switched on in the GA4 UI rather
+than by the tag. Unmarking it is not retroactive: already-processed hits keep
+their key-event counts in historical reports, and only new hits stop counting.
+Worth checking on each new client property, since GA4 puts that toggle right
+beside every newly-seen event name.
+
 Two limits worth designing around:
 
 - **`conversio_vitals` is only present when the emit happens after Core Web
