@@ -6,8 +6,9 @@ container.
 
 ## How it works
 
-- The runtime bundle in `public/` is identical for every client. It is not
-  client-specific config, it's the same JS everyone gets.
+- The runtime bundle in `public/` is the same JS for every client on a given
+  version, with one exception: the client's tracking ID is patched into it at
+  serve time (see [Client-level settings](#client-level-settings) below).
 - What's client-specific is a random key, looked up in a Cloudflare KV store
   on every request. If the key is active, the Worker serves the bundle. If
   it's missing, revoked, or (optionally) requested from a domain not on that
@@ -111,14 +112,20 @@ node scripts/manage-keys.mjs issue --client "Acme Co"
 
 Optional flags:
 
-- `--version 2.2` pins that client to a specific bundle in `public/`
-  (defaults to the current latest). Useful if a client needs to stay on an
-  older version while others move forward.
+- `--version 2.4` pins that client to a specific bundle in `public/`. Useful
+  if a client needs to stay on an older version while others move forward.
+  Note this defaults to `2.2`, not to the newest bundle present, so pass it
+  explicitly when issuing a key for a current-version client. Same for
+  `DEFAULT_VERSION` in `src/index.js`, which covers a record with no version
+  at all.
 - `--domains acme.com,www.acme.com` locks the key to those origins, checked
   against the `Referer` header (script tags don't send `Origin`). Only set
   this if you're confident the client site doesn't run a `no-referrer`
   policy, that would cause the check to fail closed. Leave it off if unsure,
   a stolen key is a much smaller risk than a broken tag.
+- `--tracking-id G-J4EDMZMNY9` sets the client's GA property ID, readable by
+  the tag as `window.conversioSettings.trackingId`. See
+  [Client-level settings](#client-level-settings).
 
 This prints the exact `<script>` tag to hand to the client for their GTM
 Custom HTML tag.
@@ -162,24 +169,150 @@ node scripts/manage-keys.mjs verify cvo_xxxxxxxxxxxxxxxxxxxxxxxx
 ```
 
 Makes a real request to the live URL and reports whether it's serving the
-bundle, the harmless inactive response, or rate limited. Useful before
-handing a new `<script>` tag to a client, or right after a revoke/activate,
-to confirm the change actually took effect rather than trusting the cache
-timing.
+bundle, the harmless inactive response, or rate limited, and which tracking
+ID (if any) is in the bytes actually being served. Useful before handing a new
+`<script>` tag to a client, or right after a revoke/activate/update, to
+confirm the change actually took effect rather than trusting the cache timing.
+
+---
+
+## Client-level settings
+
+Some values belong to the client rather than the visitor. Today that's the
+tracking ID (a GA property ID); the mechanism generalises to anything else
+that needs setting once per client.
+
+It lives in the client's KV record and is patched into the bundle at serve
+time, so the tag can read it without a second network request:
+
+```bash
+node scripts/manage-keys.mjs issue --client "Acme Co" --tracking-id G-J4EDMZMNY9
+```
+
+Set it on an existing client, or correct one, with `update`:
+
+```bash
+node scripts/manage-keys.mjs update cvo_xxxxxxxxxxxxxxxxxxxxxxxx --tracking-id G-J4EDMZMNY9
+```
+
+Clear it with an empty value (`--tracking-id ""`), which puts the client back
+to having none.
+
+Inside the tag and for any tag that runs after it, the value is on a global:
+
+```js
+window.conversioSettings.trackingId  // 'G-J4EDMZMNY9', or null if not set
+```
+
+### What the tag does with it
+
+From 2.4 on, the tag sends a GA4 event to that property alongside every
+`conversio_experience_session` and `conversio_event_instance` it emits to the
+dataLayer. Both go out under one event name, `conversio_cro`, told apart by
+their category/action/label:
+
+| Parameter | From an experience emit | From an event emit |
+| --- | --- | --- |
+| `conversio_category` | `experience_category` | `event_category` |
+| `conversio_action` | `experience_action` | `event_action` |
+| `conversio_label` | `experience_label` | `event_label` |
+| `conversio_segment` | `experience_segment` | `event_segment` |
+| `conversio_experiences` | `sessionStorage.conversioExperienceList` | same |
+| `conversio_events` | `sessionStorage.conversioEventList` | same |
+| `conversio_id` | the visitor's `conversio_id` | same |
+| `conversio_vitals` | Core Web Vitals as a JSON string, when collected | same |
+
+**Routing is the part that needed care.** A bare `gtag('event', ...)` goes to
+every measurement ID configured in that gtag instance, so on a site running
+more than one GA4 property the event lands in all of them. Each send is pinned
+with `send_to` to the single property in that client's key record, so it can't
+leak into whichever property the site happened to configure last.
+
+**The tag never calls `gtag('config', ...)`.** That property belongs to the
+client and their own tagging already configures it; configuring it again from
+here risks resetting their settings or emitting a duplicate `page_view`. The
+trade-off is the one failure mode to know about: **if the property isn't
+actually configured on the page, gtag silently drops the send.** That's the
+first thing to check if events don't show up in GA4 realtime.
+
+It uses `window.gtag` when present, which matters for a site that loaded
+gtag.js under a custom dataLayer name, and otherwise queues the command on
+`dataLayer` where gtag.js picks it up when it initialises. So a send firing
+before GA has loaded still arrives rather than being lost.
+
+**`conversio_cro` is an ordinary event, not a conversion.** Nothing in the
+payload marks it as one, and GA4 has no parameter that could. If it shows up as
+a conversion (a "key event") in a client's property, that's the per-property
+toggle in **Admin → Data display → Events**, switched on in the GA4 UI rather
+than by the tag. Unmarking it is not retroactive: already-processed hits keep
+their key-event counts in historical reports, and only new hits stop counting.
+Worth checking on each new client property, since GA4 puts that toggle right
+beside every newly-seen event name.
+
+Two limits worth designing around:
+
+- **`conversio_vitals` is only present when the emit happens after Core Web
+  Vitals collection has finished.** Experiences and events that fire early in
+  the page have no vitals to carry, and simply omit the parameter. Both cases
+  are normal, so don't treat absence as an error.
+- **GA4 truncates event parameter values at 100 characters.** The two segment
+  lists are JSON arrays that will pass that on a busy session and be cut
+  silently. If you need the full lists, the alternative is sending a count plus
+  the most recent few rather than the whole array.
+
+Things worth knowing:
+
+- **It's set before any dataLayer processing**, so a tag firing off a Conversio
+  event can already read it. It is deliberately *not* on the `conversio_data`
+  payload: that event fires late (after Core Web Vitals collection) and only
+  once emission consent arrives, so anything needing the ID at page load could
+  not rely on finding it there.
+- **It isn't gated behind emission consent**, because it's client
+  configuration, not visitor data. A GA property ID is public anyway, it
+  appears in the page source of every GA-tagged site.
+- **`null` is a normal state, not an error.** Clients with no tracking ID set,
+  clients pinned to a pre-2.4 bundle, and the pasted-inline GTM copy of the tag
+  all read as `null`. Those clients send nothing to GA4 and are otherwise
+  completely unaffected, so leaving it unset is how you turn the GA4 delivery
+  off for a client.
+- **Changing it propagates like a version change**, i.e. the KV window plus
+  what's left of the 5 minute edge cache, or near instantly with cache purge
+  configured (step 6 above). `update` purges automatically.
+- **The value is validated twice, for two different reasons.** The CLI checks
+  it looks like a real GA measurement ID, to catch a typo while you're still
+  looking at the terminal rather than shipping a dead property ID nobody
+  notices for weeks. The Worker separately checks it's safe to splice into a
+  JS string literal, because a record edited straight into KV via the
+  Cloudflare dashboard never passed through the CLI. A value failing the
+  Worker's check is dropped (the client reads `null`) and logged as
+  `tracking_id_rejected`, rather than being served.
 
 ---
 
 ## Shipping a new bundle version
 
-Add `public/runtime-tag.<version>.js`, then either issue new keys pointing at
-it or move an existing client over with:
+Add `public/runtime-tag.<version>.js` and `npx wrangler deploy`. That makes the
+bundle *available* without moving anybody: every key keeps serving whatever
+version its record pins, and `DEFAULT_VERSION` in `src/index.js` covers only
+records with no version at all. So a bad release never breaks every client at
+once, and the deploy itself is not the risky step.
+
+Moving one client over is the risky step, and it's one command:
 
 ```bash
-node scripts/manage-keys.mjs update cvo_xxxxxxxxxxxxxxxxxxxxxxxx --version 2.3
+node scripts/manage-keys.mjs update cvo_xxxxxxxxxxxxxxxxxxxxxxxx --version 2.4
 ```
 
-Old keys keep serving whatever version they were issued with until you change
-them, so a bad release never breaks every client at once.
+Rolling that client back is the same command with the old version, taking
+effect as soon as the cache purge lands.
+
+Two things to check when moving a client to 2.4 or later:
+
+- **Set their `--tracking-id` in the same breath**, or in a separate `update`.
+  Without one they get the tag but no GA4 delivery, which looks like a broken
+  release rather than an unconfigured client.
+- **Confirm nobody else moved** with `list`, which prints each client's version
+  and tracking ID alongside their status.
 
 ---
 

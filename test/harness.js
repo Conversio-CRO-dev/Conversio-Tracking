@@ -34,6 +34,9 @@ var VITALS_FIXTURE = [
 
 // opts:
 //   tagPath: path to the tag source to load (required)
+//   tagSource: source string to run instead of the file at tagPath, for
+//     exercising a transform the loader applies at serve time. tagPath is
+//     still required, as the script name in stack traces.
 //   cwv: 'ok' | 'unsupported' | 'observer-throws' | 'empty'
 //   localStorage: store or false (absent) or {throwOnRead/throwOnWrite}
 //   emissionEnabled: bool
@@ -41,6 +44,12 @@ var VITALS_FIXTURE = [
 //   localInitial: seed object for localStorage
 //   autoDrain: false leaves pending timers/callbacks undrained, so a test can
 //     interleave consent with CWV collection finishing
+//   presetSettings: seeds window.conversioSettings before the tag runs, as if
+//     another tag on the page had got there first
+//   gtag: 'spy' installs a window.gtag that records calls (the path taken when
+//     the site has gtag.js loaded), 'throws' installs one that throws, and the
+//     default of none leaves the tag to queue commands on dataLayer instead.
+//     Recorded calls come back as gtagCalls, each { command, name, params }.
 function runTag(opts) {
   opts = opts || {};
   if (!opts.tagPath) throw new Error('runTag requires opts.tagPath');
@@ -117,14 +126,39 @@ function runTag(opts) {
     window.PerformanceObserver = FakePerformanceObserver;
   }
   if (localStore) window.localStorage = localStore;
+  if (opts.presetSettings) window.conversioSettings = opts.presetSettings;
+
+  var gtagCalls = [];
+  if (opts.gtag === 'spy') {
+    window.gtag = function (command, name, params) {
+      gtagCalls.push({ command: command, name: name, params: params });
+    };
+  } else if (opts.gtag === 'throws') {
+    window.gtag = function () { throw new Error('gtag blew up'); };
+  }
+
+  // The queued fallback: with no window.gtag the tag pushes gtag command
+  // tuples onto dataLayer for gtag.js to pick up when it loads, so a test can
+  // read them back the same way gtag.js would.
+  function queuedGtagCalls() {
+    return dataLayer
+      .filter(function (e) {
+        return e && typeof e.length === 'number' && typeof e.event === 'undefined';
+      })
+      .map(function (a) { return { command: a[0], name: a[1], params: a[2] }; });
+  }
 
   sandbox.window = window;
   sandbox.document = { readyState: opts.readyState || 'complete' };
   sandbox.setTimeout = window.setTimeout;
   window.window = window;
 
+  var source = (typeof opts.tagSource === 'string')
+    ? opts.tagSource
+    : fs.readFileSync(opts.tagPath, 'utf8');
+
   var context = vm.createContext(sandbox);
-  vm.runInContext(fs.readFileSync(opts.tagPath, 'utf8'), context, { filename: opts.tagPath });
+  vm.runInContext(source, context, { filename: opts.tagPath });
 
   function drain() {
     var guard = 0;
@@ -145,7 +179,9 @@ function runTag(opts) {
     session: sessionStore._data,
     local: localStore ? localStore._data : null,
     window: window,
-    drain: drain
+    drain: drain,
+    gtagCalls: gtagCalls,
+    queuedGtagCalls: queuedGtagCalls
   };
 }
 

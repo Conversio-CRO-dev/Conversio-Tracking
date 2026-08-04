@@ -2,17 +2,21 @@
 //
 // Route shape:  GET /t/<clientKey>.js
 //
-// Every client is served the exact same runtime bundle (see self-hosted/public) -
-// the key is not a config value, it is purely an access-control token looked
-// up in KV. That lookup decides whether the request gets the bundle at all.
+// The key is first an access-control token looked up in KV, and that lookup
+// decides whether the request gets a bundle at all. Clients on the same
+// version are served the same bundle except for one substitution: the
+// client's tracking ID is patched into it at serve time (see serveBundle), so
+// per-client configuration can be set once when the key is issued without
+// every client needing its own build.
 //
 // KV binding: CLIENT_KEYS, values shaped as:
 //   {
 //     "status": "active" | "revoked",
 //     "client": "Acme Co",
 //     "version": "2.2",              // which bundle in /public to serve
-//     "domains": ["acme.com"]        // optional origin allow-list
-//   }
+//     "domains": ["acme.com"],       // optional origin allow-list
+//     "trackingId": "G-XXXXXXXXXX"   // optional, exposed to the tag as
+//   }                                //   window.conversioSettings.trackingId
 //
 // RATE_LIMITER binding: caps requests per key (see wrangler.toml), so a
 // leaked/scraped key can't be used to run up request costs or degrade
@@ -20,6 +24,19 @@
 
 var KEY_PATTERN = /^\/t\/([A-Za-z0-9_-]{16,64})\.js$/;
 var DEFAULT_VERSION = '2.2';
+
+// The slot in the bundle that the client's tracking ID is patched into. Must
+// stay in step with TRACKING_ID_SLOT in the runtime tag.
+var TRACKING_ID_SLOT = '@@CONVERSIO_TRACKING_ID@@';
+
+// Deliberately a safe-charset check rather than a GA-specific one. Two
+// different jobs: manage-keys.mjs checks the value looks like a real GA
+// measurement ID (catching typos at the point someone types one in), while
+// this checks it is safe to splice into a JS string literal that then runs on
+// every page of the client's site. A record hand-edited in the Cloudflare
+// dashboard never passed through the CLI, so this side cannot assume the
+// value was ever validated. Anything failing it is dropped, not injected.
+var TRACKING_ID_SAFE = /^[A-Za-z0-9_-]{1,64}$/;
 
 function log(reason, fields) {
   var entry = Object.assign({ event: 'conversio_loader', reason: reason }, fields || {});
@@ -67,7 +84,20 @@ function domainAllowed(hostname, domains) {
   return false;
 }
 
-async function serveBundle(request, env, version) {
+function safeTrackingId(raw, key) {
+  if (!raw) return '';
+  // Typed explicitly rather than left to RegExp coercion, so a hand-edited
+  // record holding a number or an object can't stringify into something that
+  // happens to pass the check below.
+  if (typeof raw !== 'string' || !TRACKING_ID_SAFE.test(raw)) {
+    log('tracking_id_rejected', { key: key });
+    return '';
+  }
+  return raw;
+}
+
+async function serveBundle(request, env, record, key) {
+  var version = record.version || DEFAULT_VERSION;
   var assetUrl = new URL('/runtime-tag.' + version + '.js', request.url);
   var asset = await env.ASSETS.fetch(new Request(assetUrl, request));
 
@@ -77,6 +107,12 @@ async function serveBundle(request, env, version) {
   }
 
   var body = await asset.text();
+
+  // Always substituted, even when the client has no tracking ID, so nobody is
+  // ever served the raw placeholder. An empty slot reads as "not configured"
+  // in the tag. Bundles predating the slot simply contain nothing to replace.
+  body = body.split(TRACKING_ID_SLOT).join(safeTrackingId(record.trackingId, key));
+
   return new Response(body, {
     status: 200,
     headers: {
@@ -126,6 +162,6 @@ export default {
       }
     }
 
-    return serveBundle(request, env, record.version || DEFAULT_VERSION);
+    return serveBundle(request, env, record, key);
   }
 };

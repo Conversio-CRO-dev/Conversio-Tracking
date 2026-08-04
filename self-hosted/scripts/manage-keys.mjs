@@ -3,10 +3,10 @@
 // Requires: wrangler installed and logged in (`npx wrangler login`).
 //
 // Usage:
-//   node manage-keys.mjs issue --client "Acme Co" [--version 2.2] [--domains acme.com,www.acme.com]
+//   node manage-keys.mjs issue --client "Acme Co" [--version 2.2] [--domains acme.com,www.acme.com] [--tracking-id G-XXXXXXXXXX]
 //   node manage-keys.mjs revoke <key>
 //   node manage-keys.mjs activate <key>
-//   node manage-keys.mjs update <key> [--client ...] [--version ...] [--domains ...]
+//   node manage-keys.mjs update <key> [--client ...] [--version ...] [--domains ...] [--tracking-id ...]
 //   node manage-keys.mjs verify <key>
 //   node manage-keys.mjs show <key>
 //   node manage-keys.mjs list
@@ -22,6 +22,30 @@ import { execFileSync } from 'node:child_process';
 const NAMESPACE_BINDING = 'CLIENT_KEYS';
 const WRANGLER_CONFIG = new URL('../wrangler.toml', import.meta.url).pathname;
 const LOADER_ORIGIN = 'https://tag.conversio.dev';
+
+// A GA measurement ID. Checked here so a typo is caught while someone is still
+// looking at the terminal, rather than shipping a dead property ID that nobody
+// notices for weeks. The Worker applies its own, looser, safe-to-inject check
+// on the way out (see src/index.js) since a record edited straight in the
+// Cloudflare dashboard never comes through here.
+const TRACKING_ID_PATTERN = /^G-[A-Z0-9]{4,20}$/;
+
+// Matches the line the Worker substitutes, so `verify` can report what a
+// client is actually being served rather than what KV claims.
+const SERVED_TRACKING_ID = /TRACKING_ID_SLOT\s*=\s*'([^']*)'/;
+
+function normaliseTrackingId(raw) {
+  // Upper-cased before checking: GA issues these uppercase and there is no
+  // valid lowercase variant to confuse it with, so a lowercased one is a
+  // transcription artifact rather than a different ID.
+  const value = (raw || '').trim().toUpperCase();
+  if (!value) return null;
+  if (!TRACKING_ID_PATTERN.test(value)) {
+    console.error(`Invalid --tracking-id "${raw.trim()}". Expected a GA measurement ID, e.g. G-J4EDMZMNY9.`);
+    process.exit(1);
+  }
+  return value;
+}
 
 function wrangler(args) {
   return execFileSync('npx', ['wrangler', ...args, '--config', WRANGLER_CONFIG], {
@@ -83,7 +107,7 @@ async function purgeUrl(key) {
 function cmdIssue(argv) {
   const flags = parseFlags(argv);
   if (!flags.client) {
-    console.error('Usage: issue --client "Acme Co" [--version 2.2] [--domains acme.com,www.acme.com]');
+    console.error('Usage: issue --client "Acme Co" [--version 2.2] [--domains acme.com,www.acme.com] [--tracking-id G-XXXXXXXXXX]');
     process.exit(1);
   }
 
@@ -96,6 +120,8 @@ function cmdIssue(argv) {
   if (flags.domains) {
     record.domains = flags.domains.split(',').map((d) => d.trim()).filter(Boolean);
   }
+  const trackingId = normaliseTrackingId(flags['tracking-id']);
+  if (trackingId) record.trackingId = trackingId;
 
   kvPut(key, record);
 
@@ -103,6 +129,11 @@ function cmdIssue(argv) {
   console.log(key);
   if (!flags.domains) {
     console.log('(no --domains set - this key will work from any site if it leaks; add one later with `update` if that matters for this client)');
+  }
+  if (trackingId) {
+    console.log(`(tracking ID ${trackingId}, readable by the tag as window.conversioSettings.trackingId)`);
+  } else {
+    console.log('(no --tracking-id set - window.conversioSettings.trackingId will be null for this client; add one later with `update`)');
   }
   console.log('\nGTM Custom HTML tag content:\n');
   console.log(`<script src="${LOADER_ORIGIN}/t/${key}.js" async></script>`);
@@ -136,7 +167,7 @@ async function cmdActivate(argv) {
 
 async function cmdUpdate(argv) {
   const [key, ...flagArgv] = argv;
-  if (!key) { console.error('Usage: update <key> [--client "Acme Co"] [--version 2.2] [--domains a.com,b.com]'); process.exit(1); }
+  if (!key) { console.error('Usage: update <key> [--client "Acme Co"] [--version 2.2] [--domains a.com,b.com] [--tracking-id G-XXXXXXXXXX]'); process.exit(1); }
 
   const record = kvGet(key);
   if (!record) { console.error('No record found for that key'); process.exit(1); }
@@ -145,6 +176,13 @@ async function cmdUpdate(argv) {
   if (flags.client) record.client = flags.client;
   if (flags.version) record.version = flags.version;
   if (flags.domains) record.domains = flags.domains.split(',').map((d) => d.trim()).filter(Boolean);
+  // Present-but-empty (--tracking-id "") clears it, so a wrong ID can be
+  // removed and not just replaced.
+  if ('tracking-id' in flags) {
+    const trackingId = normaliseTrackingId(flags['tracking-id']);
+    if (trackingId) record.trackingId = trackingId;
+    else delete record.trackingId;
+  }
 
   kvPut(key, record);
   console.log('Updated key for', record.client);
@@ -167,7 +205,15 @@ function cmdList() {
   const keys = JSON.parse(raw);
   for (const { name } of keys) {
     const record = kvGet(name);
-    console.log(name, '->', record ? `${record.client} (${record.status})` : 'unreadable');
+    if (!record) { console.log(name, '-> unreadable'); continue; }
+    // Version and tracking ID inline: during a staged rollout the thing you
+    // need to see at a glance is which clients have moved and which have not.
+    const bits = [
+      record.status,
+      'v' + (record.version || 'default'),
+      record.trackingId || 'no tracking id'
+    ];
+    console.log(name, '->', `${record.client} (${bits.join(', ')})`);
   }
 }
 
@@ -182,6 +228,18 @@ async function cmdVerify(argv) {
   if (res.status === 200 && body.startsWith('// CONVERSIO TAG')) {
     const versionLine = body.split('\n')[0];
     console.log(`OK - serving the runtime bundle (${versionLine.replace('// ', '')})`);
+
+    // Read back what was actually substituted into the served bytes, which is
+    // the only way to confirm the tracking ID survived KV, the Worker's own
+    // safety check, and the edge cache.
+    const served = body.match(SERVED_TRACKING_ID);
+    if (!served) {
+      console.log('Tracking ID: not supported by this bundle version');
+    } else if (!served[1]) {
+      console.log('Tracking ID: none configured (window.conversioSettings.trackingId will be null)');
+    } else {
+      console.log(`Tracking ID: ${served[1]}`);
+    }
     return;
   }
 
