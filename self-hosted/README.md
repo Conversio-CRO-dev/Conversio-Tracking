@@ -112,7 +112,7 @@ node scripts/manage-keys.mjs issue --client "Acme Co"
 
 Optional flags:
 
-- `--version 2.4` pins that client to a specific bundle in `public/`. Useful
+- `--version 2.4.1` pins that client to a specific bundle in `public/`. Useful
   if a client needs to stay on an older version while others move forward.
   Note this defaults to `2.2`, not to the newest bundle present, so pass it
   explicitly when issuing a key for a current-version client. Same for
@@ -220,7 +220,12 @@ their category/action/label:
 | `conversio_experiences` | `sessionStorage.conversioExperienceList` | same |
 | `conversio_events` | `sessionStorage.conversioEventList` | same |
 | `conversio_id` | the visitor's `conversio_id` | same |
-| `conversio_vitals` | Core Web Vitals as a JSON string, when collected | same |
+| `conversio_vitals` | Core Web Vitals as a JSON string, when collected | not sent, from 2.4.1 on |
+
+`conversio_vitals` is `{lcp, fcp, cls, inp, ps}`, in milliseconds except `cls`
+(unitless) and with `null` for anything that could not be measured. `inp`
+(Interaction to Next Paint, Google's stable responsiveness metric) arrived in
+2.4.1; a client pinned to 2.4 or earlier gets the same object without that key.
 
 **Routing is the part that needed care.** A bare `gtag('event', ...)` goes to
 every measurement ID configured in that gtag instance, so on a site running
@@ -249,12 +254,26 @@ their key-event counts in historical reports, and only new hits stop counting.
 Worth checking on each new client property, since GA4 puts that toggle right
 beside every newly-seen event name.
 
-Two limits worth designing around:
+Three limits worth designing around:
 
-- **`conversio_vitals` is only present when the emit happens after Core Web
-  Vitals collection has finished.** Experiences and events that fire early in
-  the page have no vitals to carry, and simply omit the parameter. Both cases
-  are normal, so don't treat absence as an error.
+- **`conversio_vitals` rides with the experience send only, and only when that
+  emit happens after Core Web Vitals collection has finished.** An experience
+  firing early in the page has no vitals to carry and omits the parameter, which
+  is normal rather than an error. From 2.4.1 on, `conversio_event_instance`
+  sends never carry it at all: vitals measure the page load, not the
+  interaction, so repeating the block on every event reports one page's
+  measurement as many times as the visitor happens to click. A client pinned to
+  2.4 still gets it on both sends, which is worth knowing when comparing two
+  clients' data.
+- **`inp` covers the first few seconds of the page, not its whole life.**
+  Collection closes shortly after load, so the figure is the worst interaction
+  latency inside that window, where Google's own field data measures the whole
+  page life. Early is when responsiveness is usually at its worst, the main
+  thread still being busy, so the window does catch the bad cases, but expect two
+  things: the value tends to read better than CrUX for the same page, and it is
+  `null` on the many page views with no interaction that early. Treat it as a
+  directional signal on the pages Conversio is testing rather than as a
+  replacement for a CrUX or GA4 web-vitals report.
 - **GA4 truncates event parameter values at 100 characters.** The two segment
   lists are JSON arrays that will pass that on a busy session and be cut
   silently. If you need the full lists, the alternative is sending a count plus
@@ -291,7 +310,32 @@ Things worth knowing:
 
 ## Shipping a new bundle version
 
-Add `public/runtime-tag.<version>.js` and `npx wrangler deploy`. That makes the
+From 2.4.1 on the bundle is built from the GTM copy rather than being a
+duplicate of it, so the first step is generating it:
+
+```bash
+node scripts/build-bundle.mjs 2.4.1
+```
+
+That takes `conversio_runtime_tag_<version>.js` from the repo root, drops the
+GTM script-tag wrappers, and strips every comment except the licence header. The
+served file is then about 21 KB instead of 36 KB, or 4.2 KB instead of 9 KB once
+the edge compresses it, which matters more than it looks because the 5 minute
+cache TTL below has an active visitor re-fetching it regularly.
+
+The readable file stays the source of truth: edit that, never the bundle, and
+rebuild. `--check` exits non-zero if the committed bundle is stale, for CI.
+Nothing is mangled or reflowed, so what a client's devtools shows is still
+followable code with the same identifiers, one statement per line and the
+original indentation. Line numbers shift, since the comment lines are gone, so
+match on the code rather than the line number when comparing the two files.
+
+Rebuild only for a version you are introducing. Regenerating a bundle that
+clients are already pinned to is a live-traffic change to those clients, however
+cosmetic the diff looks. Bundles up to 2.4 predate the build step and are left
+alone.
+
+Then add `public/runtime-tag.<version>.js` and `npx wrangler deploy`. That makes the
 bundle *available* without moving anybody: every key keeps serving whatever
 version its record pins, and `DEFAULT_VERSION` in `src/index.js` covers only
 records with no version at all. So a bad release never breaks every client at
@@ -300,7 +344,7 @@ once, and the deploy itself is not the risky step.
 Moving one client over is the risky step, and it's one command:
 
 ```bash
-node scripts/manage-keys.mjs update cvo_xxxxxxxxxxxxxxxxxxxxxxxx --version 2.4
+node scripts/manage-keys.mjs update cvo_xxxxxxxxxxxxxxxxxxxxxxxx --version 2.4.1
 ```
 
 Rolling that client back is the same command with the old version, taking

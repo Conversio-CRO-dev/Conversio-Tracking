@@ -13,6 +13,18 @@ plus the tooling around it.
   hostname, gated by a per-client key, and patches each client's own
   settings (currently a GA tracking ID) into the bundle as it serves it. See
   its own README for setup and day-to-day client management.
+- From 2.4.1 on, the bundle in `self-hosted/public/` is **generated** from the
+  GTM file by `self-hosted/scripts/build-bundle.mjs`, which strips the comments
+  (keeping the licence header) so visitors download roughly half the bytes.
+  Edit the GTM file, never the bundle, and rebuild:
+
+  ```bash
+  cd self-hosted && node scripts/build-bundle.mjs 2.4.1
+  ```
+
+  `--check` instead exits non-zero if the committed bundle is stale, so it can
+  be wired into CI alongside the test suites. Bundles up to 2.4 predate this and
+  are left as they were, comments included.
 - `test/` - a behavioural test suite for the runtime tag (below).
 
 ---
@@ -29,19 +41,21 @@ installs are required, only Node itself.
 Run the suite for the current version with:
 
 ```bash
-node test/runtime-tag-2.4.test.js
+node test/runtime-tag-2.4.1.test.js
 ```
 
-This runs the same set of checks against both shipped copies of the 2.4 tag,
-the GTM dev file (`conversio_runtime_tag_v2.4.js`) and the self-hosted bundle
-(`self-hosted/public/runtime-tag.2.4.js`), so the two can't silently diverge.
-A passing run looks like:
+This runs the same set of checks against both shipped copies of the 2.4.1 tag,
+the GTM dev file (`conversio_runtime_tag_v2.4.1.js`) and the self-hosted bundle
+(`self-hosted/public/runtime-tag.2.4.1.js`), so the two can't silently diverge.
+Since 2.4.1 the bundle is the comment-stripped build rather than a copy, which
+means the suite is verifying the exact bytes clients receive. A passing run looks
+like:
 
 ```
-conversio_runtime_tag_v2.4.js: 122 passed, 0 failed
-self-hosted/public/runtime-tag.2.4.js: 122 passed, 0 failed
+conversio_runtime_tag_v2.4.1.js: 157 passed, 0 failed
+self-hosted/public/runtime-tag.2.4.1.js: 157 passed, 0 failed
 
-TOTAL: 244 passed, 0 failed
+TOTAL: 314 passed, 0 failed
 ```
 
 There's a second suite for the self-hosted loader Worker, which runs it against
@@ -54,8 +68,47 @@ node test/loader.test.js
 ```
 
 Both exit non-zero if anything fails, so they're safe to wire into CI. Earlier
-versions keep their own suites (`test/runtime-tag-2.3.test.js`), which still
-pass and are worth keeping green while any client is pinned to that bundle.
+versions keep their own suites (`test/runtime-tag-2.4.test.js`,
+`test/runtime-tag-2.3.test.js`), which still pass and are worth keeping green
+while any client is pinned to those bundles.
+
+### What it covers (2.4.1)
+
+Everything in 2.4 below, plus the three things 2.4.1 changes.
+
+First, `conversio_vitals` in the GA4 payload now rides with the
+`conversio_experience_session` send only: that the experience send still carries
+the block; that the `conversio_event_instance` send no longer has the key at
+all, while every other parameter it carried in 2.4 is untouched; that a page
+with one experience and three events reports its vitals once rather than four
+times; and that the same split holds on the buffer/flush path, where both sends
+necessarily happen after collection has finished.
+
+Then the `conversio_id` timestamp, which used to end in a fixed `00` because no
+browser clock resolves microseconds. The suite simulates the clamped clock a
+real browser exposes (`test/harness.js` takes `perfTimeOrigin`/`perfNow`, and
+drops them entirely to exercise the `Date.now()` fallback): 200 ids minted on
+that clock must vary in their last two digits rather than all ending the same
+way, must stay inside the 100us window the clock reading actually points at, and
+must still be safe-integer, microsecond-scale Unix times. The `Date.now()`
+fallback gets the same treatment at its own millisecond granularity. A clock
+resolving finer than the usual clamp keeps its real reading rather than having
+those digits re-randomised, and the stored format is unchanged, so an id minted
+by 2.4 is still valid and is reused on a visitor's first 2.4.1 page load.
+
+Last, `inp` in the vitals object, so `conversio_vitals` is now
+`{lcp, fcp, cls, inp, ps}`. The checks are mostly about what counts as one
+interaction: that events sharing an `interactionId` are a single interaction
+reported as the longest of them rather than their sum; that an `interactionId`
+of 0 (a scroll, a mousemove) is never reported as an interaction latency; that
+Google's rule of discounting one interaction per 50 is applied, so a 49
+interaction page reports its worst and a 50 interaction page reports its second
+worst; that a page nobody interacted with reports `null` rather than 0, which
+would claim a perfect score for a page never put to the test; that an
+interaction too fast to be reportable is indistinguishable from none; that an
+interaction latency on its own is enough to make a vitals block worth sending
+when every other measurement failed; and that `inp` reaches GA on the experience
+send with the JSON still inside GA4's 100-character parameter limit.
 
 ### What it covers (2.4)
 
@@ -104,7 +157,7 @@ the JS served on every page of that client's site.
 ### Adding a new version
 
 When a new tag version needs its own suite, copy the pattern in
-`test/runtime-tag-2.4.test.js`: point `TAG_PATHS` at the new file(s) and reuse
+`test/runtime-tag-2.4.1.test.js`: point `TAG_PATHS` at the new file(s) and reuse
 `test/harness.js` as-is, since the harness itself is version-agnostic. Bump
 `BUNDLE_VERSION` in `test/loader.test.js` too, so the loader suite exercises
 the current bundle.
