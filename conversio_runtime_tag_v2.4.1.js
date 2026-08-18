@@ -38,6 +38,30 @@
   // their conversio_category/action/label parameters.
   var GA_EVENT_NAME             = 'conversio_cro';
 
+  // GA4 event parameters are plain strings capped at 100 characters, so the
+  // three that carry more than one value go out as delimited lists rather than
+  // as JSON. Two reasons: nothing downstream parses a GA4 parameter as JSON, so
+  // the brackets, braces and the pair of quotes around every entry are
+  // punctuation no reader wants; and on the segment lists that punctuation is
+  // six characters per entry of a budget that decides how many entries survive
+  // the truncation at all.
+  var PARAM_LIST_DELIMITER      = ',';
+  var PARAM_PAIR_DELIMITER      = ':';
+
+  // The vitals reported in the parameter, in this order, each rounded to the
+  // decimals worth keeping. An unrounded paint timing can read 1234.5999999046326
+  // and spend a fifth of the character budget on precision the clock never had,
+  // browsers clamping these to 100us. Milliseconds are pointless past one
+  // decimal; cls is unitless and small, so it keeps three. The dataLayer copy on
+  // conversio_data carries the raw numbers, so nothing is lost by rounding here.
+  var VITALS_PARAMS = [
+    { key: 'lcp', decimals: 1 },
+    { key: 'fcp', decimals: 1 },
+    { key: 'cls', decimals: 3 },
+    { key: 'inp', decimals: 0 },
+    { key: 'ps', decimals: 0 }
+  ];
+
   // Core Web Vitals collection tuning
   var VITALS_IDLE_TIMEOUT_MS    = 4000;
   var VITALS_HARD_TIMEOUT_MS    = 6000;
@@ -420,21 +444,48 @@
     dl.push(arguments);
   }
 
-  // The raw stored JSON, matching what a reader of sessionStorage would see
-  // rather than a re-serialised copy of it.
-  function storedListString(key) {
-    var raw = window.sessionStorage ? window.sessionStorage.getItem(key) : null;
-    return raw || '[]';
+  // A stored segment list as a delimited string. Only strings are joined:
+  // everything this tag puts in these lists is one, and a hand-edited
+  // sessionStorage entry holding anything else would otherwise land in the
+  // parameter as '[object Object]'. An empty list is an empty parameter.
+  function storedListParam(key) {
+    var list = loadJsonArray(key);
+    var out = [];
+    var i;
+
+    for (i = 0; i < list.length; i++) {
+      if (list[i] && typeof list[i] === 'string') out.push(list[i]);
+    }
+
+    return out.join(PARAM_LIST_DELIMITER);
   }
 
   // hasUsableVitals lives in the conversio_data section below. Vitals are
   // absent from most of these sends by nature: an experience fires when it
   // occurs, which is usually well before Core Web Vitals collection has
   // finished, so an empty result here is the normal early-page case.
-  function storedVitalsString() {
+  //
+  // A measurement that failed is left out rather than sent as a null: absent and
+  // null tell a reader the same thing, and only one of them costs characters.
+  // Non-finite values are dropped for the same reason JSON turned them into
+  // null, since 'lcp:NaN' is worse than no lcp at all.
+  function storedVitalsParam() {
     var vitals = loadJsonObject(KEY_VITALS_LATEST);
+    var parts = [];
+    var value;
+    var entry;
+    var i;
+
     if (!hasUsableVitals(vitals)) return '';
-    return safeJsonStringify(vitals, '');
+
+    for (i = 0; i < VITALS_PARAMS.length; i++) {
+      entry = VITALS_PARAMS[i];
+      value = vitals[entry.key];
+      if (typeof value !== 'number' || !isFinite(value)) continue;
+      parts.push(entry.key + PARAM_PAIR_DELIMITER + (+value.toFixed(entry.decimals)));
+    }
+
+    return parts.join(PARAM_LIST_DELIMITER);
   }
 
   function sendToGa(params) {
@@ -475,15 +526,15 @@
         conversio_action: payload.experience_action || '',
         conversio_label: payload.experience_label || '',
         conversio_segment: seg,
-        conversio_experiences: storedListString(KEY_EXPERIENCE_LIST),
-        conversio_events: storedListString(KEY_EVENT_LIST)
+        conversio_experiences: storedListParam(KEY_EXPERIENCE_LIST),
+        conversio_events: storedListParam(KEY_EVENT_LIST)
       };
 
       // Vitals are attached here and nowhere else. They measure the page load,
       // not the interaction, so the one send per experience carries them once
       // instead of every conversio_event_instance repeating the same block for
       // as many events as a visitor happens to trigger.
-      vitals = storedVitalsString();
+      vitals = storedVitalsParam();
       if (vitals) params.conversio_vitals = vitals;
 
       sendToGa(params);
@@ -509,8 +560,8 @@
         conversio_action: payload.event_action || '',
         conversio_label: payload.event_label || '',
         conversio_segment: payload.event_segment || '',
-        conversio_experiences: storedListString(KEY_EXPERIENCE_LIST),
-        conversio_events: storedListString(KEY_EVENT_LIST)
+        conversio_experiences: storedListParam(KEY_EXPERIENCE_LIST),
+        conversio_events: storedListParam(KEY_EVENT_LIST)
       });
     } catch (e) {
       // ignore

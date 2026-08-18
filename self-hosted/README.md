@@ -220,12 +220,34 @@ their category/action/label:
 | `conversio_experiences` | `sessionStorage.conversioExperienceList` | same |
 | `conversio_events` | `sessionStorage.conversioEventList` | same |
 | `conversio_id` | the visitor's `conversio_id` | same |
-| `conversio_vitals` | Core Web Vitals as a JSON string, when collected | not sent, from 2.4.1 on |
+| `conversio_vitals` | Core Web Vitals, when collected | not sent, from 2.4.1 on |
 
-`conversio_vitals` is `{lcp, fcp, cls, inp, ps}`, in milliseconds except `cls`
-(unitless) and with `null` for anything that could not be measured. `inp`
-(Interaction to Next Paint, Google's stable responsiveness metric) arrived in
-2.4.1; a client pinned to 2.4 or earlier gets the same object without that key.
+The three that carry more than one value are **delimited strings, not JSON**,
+from 2.4.1 on:
+
+```
+conversio_experiences   homepage-hero-v2,pricing-annual-toggle,nav-sticky-cta
+conversio_events        cta-click,scroll-50
+conversio_vitals        lcp:1834.6,fcp:612.7,cls:0.071,inp:96,ps:2731
+```
+
+Split on `,` to read a list, and on `:` for a vitals pair. Nothing in GA4 parses
+a parameter as JSON anyway, so the brackets and the quotes around every entry
+were punctuation no report wanted, and on the segment lists they were six
+characters per entry out of the 100 a parameter gets. On 2.4 the same three
+arrive as JSON (`["homepage-hero-v2",...]`), which is worth knowing when
+comparing two clients on different versions.
+
+`conversio_vitals` reports `lcp`, `fcp`, `cls`, `inp` and `ps` in that order, in
+milliseconds except `cls` (unitless). A measurement that failed is left out
+rather than sent as null, so a short string means less was measured, not that
+something is broken. Paint timings are rounded to one decimal and `cls` to
+three: an unrounded `1834.5999999046326` spends a fifth of the parameter on
+precision the clock never had, browsers clamping these to 100us. The
+`conversio_data` dataLayer event still carries the raw numbers as a real object,
+so nothing is lost by the rounding. `inp` (Interaction to Next Paint, Google's
+stable responsiveness metric) arrived in 2.4.1 too, so a client pinned to 2.4 or
+earlier has no `inp` at all.
 
 **Routing is the part that needed care.** A bare `gtag('event', ...)` goes to
 every measurement ID configured in that gtag instance, so on a site running
@@ -275,9 +297,11 @@ Three limits worth designing around:
   directional signal on the pages Conversio is testing rather than as a
   replacement for a CrUX or GA4 web-vitals report.
 - **GA4 truncates event parameter values at 100 characters.** The two segment
-  lists are JSON arrays that will pass that on a busy session and be cut
-  silently. If you need the full lists, the alternative is sending a count plus
-  the most recent few rather than the whole array.
+  lists will still pass that on a busy session and be cut silently, delimited or
+  not: dropping the JSON punctuation in 2.4.1 bought roughly one extra segment,
+  not immunity. Five segments averaging 20 characters is already the ceiling. If
+  you need the full lists, the alternative is sending a count plus the most
+  recent few rather than the whole list.
 
 Things worth knowing:
 

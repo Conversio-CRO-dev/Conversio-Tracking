@@ -52,10 +52,10 @@ means the suite is verifying the exact bytes clients receive. A passing run look
 like:
 
 ```
-conversio_runtime_tag_v2.4.1.js: 157 passed, 0 failed
-self-hosted/public/runtime-tag.2.4.1.js: 157 passed, 0 failed
+conversio_runtime_tag_v2.4.1.js: 172 passed, 0 failed
+self-hosted/public/runtime-tag.2.4.1.js: 172 passed, 0 failed
 
-TOTAL: 314 passed, 0 failed
+TOTAL: 344 passed, 0 failed
 ```
 
 There's a second suite for the self-hosted loader Worker, which runs it against
@@ -74,7 +74,7 @@ while any client is pinned to those bundles.
 
 ### What it covers (2.4.1)
 
-Everything in 2.4 below, plus the three things 2.4.1 changes.
+Everything in 2.4 below, plus the four things 2.4.1 changes.
 
 First, `conversio_vitals` in the GA4 payload now rides with the
 `conversio_experience_session` send only: that the experience send still carries
@@ -108,7 +108,19 @@ would claim a perfect score for a page never put to the test; that an
 interaction too fast to be reportable is indistinguishable from none; that an
 interaction latency on its own is enough to make a vitals block worth sending
 when every other measurement failed; and that `inp` reaches GA on the experience
-send with the JSON still inside GA4's 100-character parameter limit.
+send with the parameter still inside GA4's 100-character limit.
+
+Finally the shape of the GA4 string parameters, which are delimited rather than
+JSON from 2.4.1: that segment lists come out comma separated in the order they
+were seen; that vitals come out as `key:value` pairs; that none of the three
+carries a quote, bracket or brace any more; that each is shorter than the JSON it
+replaces; that an empty list is an empty parameter rather than `[]`; that a
+failed or non-finite measurement is left out rather than sent as `null` or
+`NaN`; that a long float is rounded to what the clock could resolve; that a
+non-string hand-edited into a stored list is dropped rather than reaching GA as
+`[object Object]`; and that none of this touched the internal snapshot or the
+dataLayer payload, which are still JSON and a full-precision object
+respectively.
 
 ### What it covers (2.4)
 

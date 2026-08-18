@@ -26,6 +26,17 @@
 
   var GA_EVENT_NAME             = 'conversio_cro';
 
+  var PARAM_LIST_DELIMITER      = ',';
+  var PARAM_PAIR_DELIMITER      = ':';
+
+  var VITALS_PARAMS = [
+    { key: 'lcp', decimals: 1 },
+    { key: 'fcp', decimals: 1 },
+    { key: 'cls', decimals: 3 },
+    { key: 'inp', decimals: 0 },
+    { key: 'ps', decimals: 0 }
+  ];
+
   var VITALS_IDLE_TIMEOUT_MS    = 4000;
   var VITALS_HARD_TIMEOUT_MS    = 6000;
 
@@ -292,15 +303,35 @@
     dl.push(arguments);
   }
 
-  function storedListString(key) {
-    var raw = window.sessionStorage ? window.sessionStorage.getItem(key) : null;
-    return raw || '[]';
+  function storedListParam(key) {
+    var list = loadJsonArray(key);
+    var out = [];
+    var i;
+
+    for (i = 0; i < list.length; i++) {
+      if (list[i] && typeof list[i] === 'string') out.push(list[i]);
+    }
+
+    return out.join(PARAM_LIST_DELIMITER);
   }
 
-  function storedVitalsString() {
+  function storedVitalsParam() {
     var vitals = loadJsonObject(KEY_VITALS_LATEST);
+    var parts = [];
+    var value;
+    var entry;
+    var i;
+
     if (!hasUsableVitals(vitals)) return '';
-    return safeJsonStringify(vitals, '');
+
+    for (i = 0; i < VITALS_PARAMS.length; i++) {
+      entry = VITALS_PARAMS[i];
+      value = vitals[entry.key];
+      if (typeof value !== 'number' || !isFinite(value)) continue;
+      parts.push(entry.key + PARAM_PAIR_DELIMITER + (+value.toFixed(entry.decimals)));
+    }
+
+    return parts.join(PARAM_LIST_DELIMITER);
   }
 
   function sendToGa(params) {
@@ -337,11 +368,11 @@
         conversio_action: payload.experience_action || '',
         conversio_label: payload.experience_label || '',
         conversio_segment: seg,
-        conversio_experiences: storedListString(KEY_EXPERIENCE_LIST),
-        conversio_events: storedListString(KEY_EVENT_LIST)
+        conversio_experiences: storedListParam(KEY_EXPERIENCE_LIST),
+        conversio_events: storedListParam(KEY_EVENT_LIST)
       };
 
-      vitals = storedVitalsString();
+      vitals = storedVitalsParam();
       if (vitals) params.conversio_vitals = vitals;
 
       sendToGa(params);
@@ -366,8 +397,8 @@
         conversio_action: payload.event_action || '',
         conversio_label: payload.event_label || '',
         conversio_segment: payload.event_segment || '',
-        conversio_experiences: storedListString(KEY_EXPERIENCE_LIST),
-        conversio_events: storedListString(KEY_EVENT_LIST)
+        conversio_experiences: storedListParam(KEY_EXPERIENCE_LIST),
+        conversio_events: storedListParam(KEY_EVENT_LIST)
       });
     } catch (e) {
     }

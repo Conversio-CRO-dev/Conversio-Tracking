@@ -3,7 +3,8 @@
 // the single-event-per-page-load guarantee - plus the three changes 2.4.1 makes
 // to 2.4, in sections 15 to 17: conversio_vitals goes to GA on the experience
 // send only, the conversio_id timestamp no longer ends in a fixed '00', and the
-// vitals object carries INP.
+// vitals object carries INP. Section 18 covers the delimited form the GA4 string
+// parameters now take, in place of JSON.
 //
 // Runs the same suite against both shipped copies of the tag (the GTM dev
 // file and the self-hosted bundle) so the two can never silently diverge.
@@ -32,6 +33,18 @@ function dataEvents(dl) {
 
 function isObject(value) {
   return !!value && typeof value === 'object';
+}
+
+// Reads the delimited form the conversio_vitals parameter now takes,
+// 'lcp:1234.5,fcp:456.7,...', back into an object to assert on.
+function parseVitalsParam(value) {
+  var out = {};
+  if (typeof value !== 'string' || !value) return out;
+  value.split(',').forEach(function (pair) {
+    var bits = pair.split(':');
+    out[bits[0]] = Number(bits[1]);
+  });
+  return out;
 }
 
 function runSuite(tagPath, label) {
@@ -448,9 +461,9 @@ function runSuite(tagPath, label) {
 
     // The two lists must not be crossed: each carries what its name says.
     check('conversio_experiences holds experience segments',
-      p.conversio_experiences === '["s1"]', String(p.conversio_experiences));
+      p.conversio_experiences === 's1', String(p.conversio_experiences));
     check('conversio_events holds event segments',
-      p.conversio_events === '[]', String(p.conversio_events));
+      p.conversio_events === '', String(p.conversio_events));
 
     var withEvent = gaRun({ cwv: 'ok', emissionEnabled: true });
     pushEvent(withEvent, 'e1');
@@ -461,9 +474,9 @@ function runSuite(tagPath, label) {
     check('event label mapped', ep.conversio_label === 'evt-lab', String(ep.conversio_label));
     check('event segment mapped', ep.conversio_segment === 'e1', String(ep.conversio_segment));
     check('event conversio_events holds event segments',
-      ep.conversio_events === '["e1"]', String(ep.conversio_events));
+      ep.conversio_events === 'e1', String(ep.conversio_events));
     check('event conversio_experiences stays empty',
-      ep.conversio_experiences === '[]', String(ep.conversio_experiences));
+      ep.conversio_experiences === '', String(ep.conversio_experiences));
     check('event carries conversio_id too', ID_RE.test(ep.conversio_id || ''), String(ep.conversio_id));
 
     // No tracking ID configured: GA delivery is simply off. The shipped files
@@ -498,7 +511,7 @@ function runSuite(tagPath, label) {
     var lateParams = croCalls(early.gtagCalls)[1].params;
     check('an experience after CWV finishes carries them',
       typeof lateParams.conversio_vitals === 'string' &&
-      JSON.parse(lateParams.conversio_vitals).ps === 2000, String(lateParams.conversio_vitals));
+      parseVitalsParam(lateParams.conversio_vitals).ps === 2000, String(lateParams.conversio_vitals));
 
     var seeded = gaRun({
       cwv: 'ok',
@@ -507,9 +520,9 @@ function runSuite(tagPath, label) {
     });
     pushExperience(seeded, 's1');
     var sp = croCalls(seeded.gtagCalls)[0].params;
-    check('collected vitals sent as a JSON string',
+    check('collected vitals sent as a delimited string',
       typeof sp.conversio_vitals === 'string' &&
-      JSON.parse(sp.conversio_vitals).lcp === 1234.5, String(sp.conversio_vitals));
+      parseVitalsParam(sp.conversio_vitals).lcp === 1234.5, String(sp.conversio_vitals));
 
     // With no window.gtag the command queues on dataLayer, which is what
     // gtag.js drains when it loads.
@@ -564,7 +577,10 @@ function runSuite(tagPath, label) {
   // 15. conversio_vitals goes to GA on the experience send only (2.4.1)
   (function () {
     var GA_ID = 'G-J4EDMZMNY9';
-    var VITALS = '{"lcp":1234.5,"fcp":456.7,"cls":0.07,"inp":96,"ps":2000}';
+    // The snapshot in sessionStorage is still JSON: only what goes to GA4
+    // changed shape.
+    var VITALS_STORED = '{"lcp":1234.5,"fcp":456.7,"cls":0.07,"inp":96,"ps":2000}';
+    var VITALS_PARAM = 'lcp:1234.5,fcp:456.7,cls:0.07,inp:96,ps:2000';
 
     function croCalls(calls) {
       return calls.filter(function (c) { return c.name === 'conversio_cro'; });
@@ -601,7 +617,7 @@ function runSuite(tagPath, label) {
       cwv: 'ok',
       emissionEnabled: true,
       gtag: 'spy',
-      sessionInitial: { conversio_vitals: VITALS }
+      sessionInitial: { conversio_vitals: VITALS_STORED }
     });
     pushExperience(r, 's1');
     pushEvent(r, 'e1');
@@ -612,7 +628,7 @@ function runSuite(tagPath, label) {
     var expParams = calls[0].params;
     var evtParams = calls[1].params;
     check('experience send carries conversio_vitals',
-      expParams.conversio_vitals === VITALS, String(expParams.conversio_vitals));
+      expParams.conversio_vitals === VITALS_PARAM, String(expParams.conversio_vitals));
     check('event send has NO conversio_vitals key',
       !('conversio_vitals' in evtParams), JSON.stringify(evtParams));
 
@@ -624,7 +640,7 @@ function runSuite(tagPath, label) {
       evtParams.conversio_action === 'evt-act' &&
       evtParams.conversio_label === 'evt-lab' &&
       evtParams.conversio_segment === 'e1' &&
-      evtParams.conversio_events === '["e1"]' &&
+      evtParams.conversio_events === 'e1' &&
       ID_RE.test(evtParams.conversio_id || ''), JSON.stringify(evtParams));
 
     // The dataLayer side of both emits never carried vitals and still doesn't,
@@ -642,7 +658,7 @@ function runSuite(tagPath, label) {
       cwv: 'ok',
       emissionEnabled: true,
       gtag: 'spy',
-      sessionInitial: { conversio_vitals: VITALS }
+      sessionInitial: { conversio_vitals: VITALS_STORED }
     });
     pushExperience(many, 's1');
     pushEvent(many, 'e1');
@@ -880,12 +896,158 @@ function runSuite(tagPath, label) {
       return c.name === 'conversio_cro';
     })[0].params.conversio_vitals;
     check('inp rides along in the GA experience payload',
-      typeof gaVitals === 'string' && JSON.parse(gaVitals).inp === 96, String(gaVitals));
+      typeof gaVitals === 'string' && parseVitalsParam(gaVitals).inp === 96, String(gaVitals));
     // GA4 truncates parameter values at 100 characters and inp made this string
     // longer, so the headroom is worth asserting rather than assuming.
-    check('the vitals JSON still fits the GA4 100-character parameter limit',
+    check('the vitals parameter still fits the GA4 100-character limit',
       typeof gaVitals === 'string' && gaVitals.length <= 100,
       gaVitals.length + ' chars: ' + gaVitals);
+  })();
+
+  // 18. GA4 string parameters are delimited, not JSON (2.4.1)
+  (function () {
+    var GA_ID = 'G-J4EDMZMNY9';
+
+    function gaRun(opts) {
+      opts = opts || {};
+      opts.gtag = 'spy';
+      return tagWithTrackingId(GA_ID, opts);
+    }
+
+    function croCalls(r) {
+      return r.gtagCalls.filter(function (c) { return c.name === 'conversio_cro'; });
+    }
+
+    function lastParams(r) {
+      var calls = croCalls(r);
+      return calls.length ? calls[calls.length - 1].params : null;
+    }
+
+    function pushExperience(r, seg) {
+      r.window.dataLayer.push({
+        event: 'conversioExperience',
+        conversio: {
+          experience_segment: seg,
+          experience_category: 'c',
+          experience_action: 'a',
+          experience_label: 'l'
+        }
+      });
+    }
+
+    function pushEvent(r, seg) {
+      r.window.dataLayer.push({
+        event: 'conversioEvent',
+        conversio: { event_segment: seg, event_category: 'c', event_action: 'a', event_label: 'l' }
+      });
+    }
+
+    var r = gaRun({ cwv: 'ok', emissionEnabled: true });
+    pushExperience(r, 'homepage-hero');
+    pushEvent(r, 'cta-click');
+    pushEvent(r, 'scroll-50');
+    pushExperience(r, 'pricing-table');
+
+    var last = lastParams(r);
+    check('experience segments are comma separated, in the order seen',
+      last.conversio_experiences === 'homepage-hero,pricing-table',
+      String(last.conversio_experiences));
+    check('event segments are comma separated, in the order seen',
+      last.conversio_events === 'cta-click,scroll-50', String(last.conversio_events));
+    check('vitals are key:value pairs',
+      last.conversio_vitals === 'lcp:1234.5,fcp:456.7,cls:0.07,inp:96,ps:2000',
+      String(last.conversio_vitals));
+
+    // The point of the change: none of the three carries JSON punctuation any
+    // more, so nothing reading them in GA4 sees escaped quotes.
+    var joined = [last.conversio_experiences, last.conversio_events, last.conversio_vitals].join('|');
+    check('no quotes, brackets or braces in any of the three',
+      !/["'{}\[\]]/.test(joined), joined);
+
+    // And they are shorter, which is the character-limit half of the reason.
+    check('the list parameter is shorter than the JSON it replaces',
+      last.conversio_experiences.length < JSON.stringify(['homepage-hero', 'pricing-table']).length,
+      last.conversio_experiences.length + ' vs ' +
+        JSON.stringify(['homepage-hero', 'pricing-table']).length);
+    check('the vitals parameter is shorter than the JSON it replaces',
+      last.conversio_vitals.length <
+        '{"lcp":1234.5,"fcp":456.7,"cls":0.07,"inp":96,"ps":2000}'.length,
+      String(last.conversio_vitals.length));
+
+    // An empty list is an empty parameter rather than the two characters '[]'.
+    var fresh = gaRun({ cwv: 'ok', emissionEnabled: true });
+    pushExperience(fresh, 's1');
+    check('an empty list is an empty string', lastParams(fresh).conversio_events === '',
+      String(lastParams(fresh).conversio_events));
+
+    // A failed measurement is left out rather than sent as a null. cwv 'empty'
+    // leaves a seeded snapshot in place, since a failed collection never
+    // overwrites one.
+    var partial = gaRun({
+      cwv: 'empty',
+      emissionEnabled: true,
+      sessionInitial: { conversio_vitals: '{"lcp":null,"fcp":null,"cls":0,"inp":96,"ps":null}' }
+    });
+    pushExperience(partial, 's1');
+    check('null measurements are left out of the parameter',
+      lastParams(partial).conversio_vitals === 'cls:0,inp:96',
+      String(lastParams(partial).conversio_vitals));
+
+    // A tampered snapshot must not put 'lcp:NaN' into the parameter.
+    var nonFinite = gaRun({
+      cwv: 'empty',
+      emissionEnabled: true,
+      sessionInitial: { conversio_vitals: '{"lcp":1e999,"fcp":456.7,"cls":0,"inp":null,"ps":null}' }
+    });
+    pushExperience(nonFinite, 's1');
+    check('non-finite measurements are left out too',
+      lastParams(nonFinite).conversio_vitals === 'fcp:456.7,cls:0',
+      String(lastParams(nonFinite).conversio_vitals));
+
+    // Unrounded paint timings run to sixteen digits, which would spend a fifth
+    // of the budget on precision the clamped clock never had.
+    var longFloats = gaRun({
+      cwv: 'empty',
+      emissionEnabled: true,
+      sessionInitial: { conversio_vitals: JSON.stringify({
+        lcp: 1234.5999999046326,
+        fcp: 456.70000004768372,
+        cls: 0.07123456,
+        inp: 96,
+        ps: 2000
+      }) }
+    });
+    pushExperience(longFloats, 's1');
+    var rounded = lastParams(longFloats).conversio_vitals;
+    check('long floats are rounded to what the clock could resolve',
+      rounded === 'lcp:1234.6,fcp:456.7,cls:0.071,inp:96,ps:2000', String(rounded));
+    check('so the vitals parameter stays well inside 100 characters',
+      rounded.length <= 100, rounded.length + ' chars');
+
+    // Only the GA4 channel changed shape.
+    check('the stored vitals snapshot is still JSON',
+      r.session.conversio_vitals.charAt(0) === '{', String(r.session.conversio_vitals));
+    var payload = dataEvents(r.dataLayer)[0].conversio.conversio_vitals;
+    check('conversio_data still carries an object, at full precision',
+      isObject(payload) && payload.lcp === 1234.5 && payload.fcp === 456.7,
+      JSON.stringify(payload));
+    var dlExperience = r.dataLayer.filter(function (e) {
+      return e.event === 'conversio_experience_session';
+    })[0];
+    check('the dataLayer emits still carry no lists at all',
+      !!dlExperience && !('conversio_experiences' in dlExperience.conversio),
+      JSON.stringify(dlExperience && dlExperience.conversio));
+
+    // A hand-edited list entry that is not a string must not reach the parameter.
+    var hostile = gaRun({
+      cwv: 'ok',
+      emissionEnabled: true,
+      sessionInitial: { conversioExperienceList: '["kept",{"a":1},null,42,""]' }
+    });
+    pushExperience(hostile, 'kept');
+    check('non-string list entries are dropped',
+      lastParams(hostile).conversio_experiences === 'kept',
+      String(lastParams(hostile).conversio_experiences));
   })();
 
   return { pass: pass, fail: fail };
