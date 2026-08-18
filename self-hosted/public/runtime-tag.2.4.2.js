@@ -20,6 +20,9 @@
 
   var KEY_CONVERSIO_ID          = 'conversio_id';
 
+  var EXPERIENCE_TRIGGER_NAMES  = ['conversioExperience', 'conversio_experience'];
+  var EVENT_TRIGGER_NAMES       = ['conversioEvent', 'conversio_event'];
+
   var EXPERIENCE_EVENT_NAME     = 'conversio_experience_session';
   var CONVERSIO_EVENT_EMIT_NAME = 'conversio_event_instance';
   var VITALS_EVENT_NAME         = 'conversio_data';
@@ -276,20 +279,24 @@
     window.sessionStorage.setItem(KEY_EMISSION_ENABLED, value ? 'true' : 'false');
   }
 
+  function isTriggerFor(item, names) {
+    var i;
+
+    if (!isObject(item) || !isObject(item.conversio)) return false;
+
+    for (i = 0; i < names.length; i++) {
+      if (item.event === names[i]) return true;
+    }
+
+    return false;
+  }
+
   function isConversioExperience(item) {
-    return (
-      isObject(item) &&
-      item.event === 'conversioExperience' &&
-      isObject(item.conversio)
-    );
+    return isTriggerFor(item, EXPERIENCE_TRIGGER_NAMES);
   }
 
   function isConversioEvent(item) {
-    return (
-      isObject(item) &&
-      item.event === 'conversioEvent' &&
-      isObject(item.conversio)
-    );
+    return isTriggerFor(item, EVENT_TRIGGER_NAMES);
   }
 
   function gtagCommand() {

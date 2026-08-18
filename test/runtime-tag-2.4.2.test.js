@@ -1054,6 +1054,170 @@ function runSuite(tagPath, label) {
       String(lastParams(hostile).conversio_experiences));
   })();
 
+  // 19. Both trigger name conventions are accepted (2.4.2)
+  (function () {
+    var GA_ID = 'G-J4EDMZMNY9';
+
+    function push(r, name, payload) {
+      r.window.dataLayer.push({ event: name, conversio: payload });
+    }
+
+    function experiencePayload(seg) {
+      return {
+        experience_segment: seg,
+        experience_category: 'exp-cat',
+        experience_action: 'exp-act',
+        experience_label: 'exp-lab'
+      };
+    }
+
+    function eventPayload(seg) {
+      return {
+        event_segment: seg,
+        event_category: 'evt-cat',
+        event_action: 'evt-act',
+        event_label: 'evt-lab'
+      };
+    }
+
+    function emitsOf(r, name) {
+      return r.dataLayer.filter(function (e) { return e && e.event === name; });
+    }
+
+    // Two runs differing only in which name the container pushed. Everything
+    // downstream of the match is shared code, so the way to check that is to
+    // compare the two runs rather than to re-asssert the payload shape here:
+    // the emits and the storage they leave behind must be identical.
+    var camel = tag({ cwv: 'ok', emissionEnabled: true });
+    push(camel, 'conversioExperience', experiencePayload('s1'));
+    push(camel, 'conversioEvent', eventPayload('e1'));
+
+    var snake = tag({ cwv: 'ok', emissionEnabled: true });
+    push(snake, 'conversio_experience', experiencePayload('s1'));
+    push(snake, 'conversio_event', eventPayload('e1'));
+
+    check('conversio_experience emits one experience session',
+      emitsOf(snake, 'conversio_experience_session').length === 1,
+      'got ' + emitsOf(snake, 'conversio_experience_session').length);
+    check('conversio_event emits one event instance',
+      emitsOf(snake, 'conversio_event_instance').length === 1,
+      'got ' + emitsOf(snake, 'conversio_event_instance').length);
+    check('the experience emit matches the camelCase run field for field',
+      JSON.stringify(emitsOf(snake, 'conversio_experience_session')[0]) ===
+        JSON.stringify(emitsOf(camel, 'conversio_experience_session')[0]),
+      JSON.stringify(emitsOf(snake, 'conversio_experience_session')[0]));
+    check('the event emit matches the camelCase run field for field',
+      JSON.stringify(emitsOf(snake, 'conversio_event_instance')[0]) ===
+        JSON.stringify(emitsOf(camel, 'conversio_event_instance')[0]),
+      JSON.stringify(emitsOf(snake, 'conversio_event_instance')[0]));
+    check('and both runs leave identical sessionStorage behind',
+      JSON.stringify(snake.session) === JSON.stringify(camel.session),
+      JSON.stringify(snake.session));
+
+    // A container part-way through the move can push each name, so the two have
+    // to share the per-segment state rather than each keeping their own: a
+    // segment already reported under one name is not reported again under the
+    // other, which would double-count the same experience.
+    var mixed = tag({ cwv: 'ok', emissionEnabled: true });
+    push(mixed, 'conversioExperience', experiencePayload('s1'));
+    push(mixed, 'conversio_experience', experiencePayload('s1'));
+    push(mixed, 'conversio_experience', experiencePayload('s2'));
+    check('a segment seen under one name is not re-emitted under the other',
+      emitsOf(mixed, 'conversio_experience_session').length === 2,
+      'got ' + emitsOf(mixed, 'conversio_experience_session').length);
+    check('the two segment lists are one list, in the order seen',
+      mixed.session.conversioExperienceList === '["s1","s2"]',
+      String(mixed.session.conversioExperienceList));
+
+    // Events are one instance per push under either name, since an event is an
+    // occurrence rather than a state. A container must not push both names for
+    // the same interaction, and the tag reports what it is given.
+    var events = tag({ cwv: 'ok', emissionEnabled: true });
+    push(events, 'conversioEvent', eventPayload('e1'));
+    push(events, 'conversio_event', eventPayload('e1'));
+    check('each event push is its own instance, whichever name it used',
+      emitsOf(events, 'conversio_event_instance').length === 2,
+      'got ' + emitsOf(events, 'conversio_event_instance').length);
+    check('and the segment appears once in the event list',
+      events.session.conversioEventList === '["e1"]',
+      String(events.session.conversioEventList));
+
+    // The pre-load path: items already sitting in the dataLayer when the tag
+    // initialises are swept by processExistingDataLayer, which uses the same
+    // matcher as the push hook.
+    var preloaded = tag({
+      cwv: 'ok',
+      emissionEnabled: true,
+      dataLayerInitial: [
+        { event: 'conversio_experience', conversio: experiencePayload('s1') },
+        { event: 'conversio_event', conversio: eventPayload('e1') }
+      ]
+    });
+    check('a snake_case experience already in the dataLayer is picked up',
+      emitsOf(preloaded, 'conversio_experience_session').length === 1,
+      'got ' + emitsOf(preloaded, 'conversio_experience_session').length);
+    check('a snake_case event already in the dataLayer is picked up',
+      emitsOf(preloaded, 'conversio_event_instance').length === 1,
+      'got ' + emitsOf(preloaded, 'conversio_event_instance').length);
+
+    // The consent gate sits downstream of the match, so a snake_case event
+    // pushed before consent is buffered and delivered on flush, exactly as the
+    // camelCase one is.
+    var gated = tag({ cwv: 'ok' });
+    push(gated, 'conversio_event', eventPayload('e1'));
+    push(gated, 'conversio_experience', experiencePayload('s1'));
+    check('nothing is emitted before consent',
+      emitsOf(gated, 'conversio_event_instance').length === 0 &&
+        emitsOf(gated, 'conversio_experience_session').length === 0,
+      JSON.stringify(gated.dataLayer.map(function (e) { return e && e.event; })));
+    gated.window.__conversioEnableEmission__();
+    gated.drain();
+    check('and both arrive on consent',
+      emitsOf(gated, 'conversio_event_instance').length === 1 &&
+        emitsOf(gated, 'conversio_experience_session').length === 1,
+      JSON.stringify(gated.dataLayer.map(function (e) { return e && e.event; })));
+
+    // GA4 delivery is downstream too: a snake_case trigger sends the same
+    // conversio_cro, its parameters differing only in the random conversio_id.
+    function croParams(r) {
+      var calls = r.gtagCalls.filter(function (c) { return c.name === 'conversio_cro'; });
+      return calls.map(function (c) {
+        var copy = Object.assign({}, c.params);
+        delete copy.conversio_id;
+        return copy;
+      });
+    }
+
+    var gaCamel = tagWithTrackingId(GA_ID, { cwv: 'ok', emissionEnabled: true, gtag: 'spy' });
+    push(gaCamel, 'conversioExperience', experiencePayload('s1'));
+    push(gaCamel, 'conversioEvent', eventPayload('e1'));
+
+    var gaSnake = tagWithTrackingId(GA_ID, { cwv: 'ok', emissionEnabled: true, gtag: 'spy' });
+    push(gaSnake, 'conversio_experience', experiencePayload('s1'));
+    push(gaSnake, 'conversio_event', eventPayload('e1'));
+
+    check('a snake_case trigger sends the same two conversio_cro events',
+      croParams(gaSnake).length === 2 &&
+        JSON.stringify(croParams(gaSnake)) === JSON.stringify(croParams(gaCamel)),
+      JSON.stringify(croParams(gaSnake)));
+
+    // Neither name is a trigger on its own: the payload object is still
+    // required, and no other event name became one by being close to these.
+    var ignored = tag({ cwv: 'ok', emissionEnabled: true });
+    ignored.window.dataLayer.push({ event: 'conversio_experience' });
+    ignored.window.dataLayer.push({ event: 'conversio_event', conversio: 'not-an-object' });
+    push(ignored, 'conversio_experiences', experiencePayload('s1'));
+    push(ignored, 'Conversio_Event', eventPayload('e1'));
+    push(ignored, 'conversio_experience_v2', experiencePayload('s2'));
+    check('a trigger name with no usable conversio payload is ignored',
+      emitsOf(ignored, 'conversio_event_instance').length === 0,
+      JSON.stringify(ignored.dataLayer.map(function (e) { return e && e.event; })));
+    check('a near-miss name is not a trigger, and the match is case sensitive',
+      emitsOf(ignored, 'conversio_experience_session').length === 0 &&
+        !ignored.session.conversioExperienceList && !ignored.session.conversioEventList,
+      JSON.stringify(ignored.session));
+  })();
+
   return { pass: pass, fail: fail };
 }
 

@@ -27,6 +27,27 @@ plus the tooling around it.
   are left as they were, comments included.
 - `test/` - a behavioural test suite for the runtime tag (below).
 
+## Trigger events
+
+The tag is driven by two dataLayer events the client's container pushes, each
+carrying a `conversio` payload object: an experience (`experience_segment`,
+`experience_category`, `experience_action`, `experience_label`) and an event
+(`event_segment` and the same three). Both are accepted under two names:
+
+| Pushes | Names accepted |
+| --- | --- |
+| an experience | `conversioExperience`, `conversio_experience` |
+| an event | `conversioEvent`, `conversio_event` |
+
+The snake_case pair arrived in 2.4.2 and is where the naming is heading; the
+camelCase pair is what every client pushes today and stays supported. Nothing
+downstream of the match knows which name arrived, so a container can move over
+whenever it does, and one part-way through the move can push each.
+
+What a container must not do is push both names for the same occurrence.
+Experiences would survive it, being de-duplicated by segment, but an event is one
+instance per push and a second push is a second instance.
+
 ---
 
 ## Testing
@@ -52,10 +73,10 @@ means the suite is verifying the exact bytes clients receive. A passing run look
 like:
 
 ```
-conversio_runtime_tag_v2.4.2.js: 172 passed, 0 failed
-self-hosted/public/runtime-tag.2.4.2.js: 172 passed, 0 failed
+conversio_runtime_tag_v2.4.2.js: 188 passed, 0 failed
+self-hosted/public/runtime-tag.2.4.2.js: 188 passed, 0 failed
 
-TOTAL: 344 passed, 0 failed
+TOTAL: 376 passed, 0 failed
 ```
 
 There's a second suite for the self-hosted loader Worker, which runs it against
@@ -100,6 +121,21 @@ only successful measurement was the interaction sends no vitals parameter at all
 rather than an `inp`-only one.
 
 Everything else 2.4.1 introduced is unchanged and still covered below.
+
+2.4.2 also accepts `conversio_experience` and `conversio_event` alongside the
+camelCase names (above). Since everything downstream of the match is shared code,
+most of the section compares two runs differing only in the name pushed: the
+emits must match field for field and the `sessionStorage` they leave behind must
+be identical. Then the cases a mixed container creates: a segment already
+reported under one name is not reported again under the other and the two feed
+one segment list, while an event stays one instance per push under either name;
+the sweep of items already on the dataLayer at init picks up a snake_case trigger
+as well as the push hook does; a pre-consent snake_case event is buffered and
+arrives on flush; and the GA4 send is the same `conversio_cro` either way, its
+parameters differing only in the random `conversio_id`. Last, that the widening
+did not turn a near-miss into a trigger: the payload object is still required,
+the match is still case sensitive, and a name merely close to these is still
+ignored.
 
 ### What it covers (2.4.1)
 

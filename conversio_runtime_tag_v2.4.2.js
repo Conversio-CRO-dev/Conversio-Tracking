@@ -29,6 +29,21 @@
   // across sessions so a returning browser is recognised as the same one.
   var KEY_CONVERSIO_ID          = 'conversio_id';
 
+  // Inbound trigger event names: the dataLayer events a client's container
+  // pushes to report an experience or an event. Each is accepted under two
+  // names, the camelCase one every client pushes today and the snake_case one
+  // the naming is moving to. Nothing downstream of the match knows which name
+  // arrived, so a client can move over whenever their container does, and a
+  // container part-way through the move can push each.
+  //
+  // What a container must not do is push both names for the same occurrence.
+  // Experiences would survive it, being de-duplicated by segment, but an event
+  // is one instance per push and a second push is a second instance: see
+  // processOneConversioEvent, where the processed flag guards the same object
+  // reaching the queue twice rather than two pushes of the same interaction.
+  var EXPERIENCE_TRIGGER_NAMES  = ['conversioExperience', 'conversio_experience'];
+  var EVENT_TRIGGER_NAMES       = ['conversioEvent', 'conversio_event'];
+
   // Outbound emit event names
   var EXPERIENCE_EVENT_NAME     = 'conversio_experience_session';
   var CONVERSIO_EVENT_EMIT_NAME = 'conversio_event_instance';
@@ -384,20 +399,28 @@
     window.sessionStorage.setItem(KEY_EMISSION_ENABLED, value ? 'true' : 'false');
   }
 
+  // A dataLayer item is a trigger when its event name is either of the pair and
+  // it carries a conversio payload object. The name is compared in a loop rather
+  // than with indexOf so the match stays available on a browser old enough to
+  // reach this tag without the ES5 array methods.
+  function isTriggerFor(item, names) {
+    var i;
+
+    if (!isObject(item) || !isObject(item.conversio)) return false;
+
+    for (i = 0; i < names.length; i++) {
+      if (item.event === names[i]) return true;
+    }
+
+    return false;
+  }
+
   function isConversioExperience(item) {
-    return (
-      isObject(item) &&
-      item.event === 'conversioExperience' &&
-      isObject(item.conversio)
-    );
+    return isTriggerFor(item, EXPERIENCE_TRIGGER_NAMES);
   }
 
   function isConversioEvent(item) {
-    return (
-      isObject(item) &&
-      item.event === 'conversioEvent' &&
-      isObject(item.conversio)
-    );
+    return isTriggerFor(item, EVENT_TRIGGER_NAMES);
   }
 
   // --- GA4 delivery ------------------------------------------------------

@@ -65,6 +65,9 @@ var VITALS_FIXTURE = [
 //   emissionEnabled: bool
 //   sessionInitial: seed object for sessionStorage
 //   localInitial: seed object for localStorage
+//   dataLayerInitial: items to place on the dataLayer before the tag runs, so
+//     the sweep of what is already there is exercised rather than only the
+//     push hook
 //   autoDrain: false leaves pending timers/callbacks undrained, so a test can
 //     interleave consent with CWV collection finishing
 //   presetSettings: seeds window.conversioSettings before the tag runs, as if
@@ -142,7 +145,9 @@ function runTag(opts) {
   }
   if (opts.perfNow === false) delete performance.now;
 
-  var dataLayer = [];
+  // Items already on the dataLayer when the tag loads, for the sweep it does at
+  // init before hooking push(). Pushed emits land after them, as on a real page.
+  var dataLayer = (opts.dataLayerInitial || []).slice();
 
   var sandbox = {
     console: console,
