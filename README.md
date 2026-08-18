@@ -19,7 +19,7 @@ plus the tooling around it.
   Edit the GTM file, never the bundle, and rebuild:
 
   ```bash
-  cd self-hosted && node scripts/build-bundle.mjs 2.4.1
+  cd self-hosted && node scripts/build-bundle.mjs 2.4.2
   ```
 
   `--check` instead exits non-zero if the committed bundle is stale, so it can
@@ -41,19 +41,19 @@ installs are required, only Node itself.
 Run the suite for the current version with:
 
 ```bash
-node test/runtime-tag-2.4.1.test.js
+node test/runtime-tag-2.4.2.test.js
 ```
 
-This runs the same set of checks against both shipped copies of the 2.4.1 tag,
-the GTM dev file (`conversio_runtime_tag_v2.4.1.js`) and the self-hosted bundle
-(`self-hosted/public/runtime-tag.2.4.1.js`), so the two can't silently diverge.
+This runs the same set of checks against both shipped copies of the 2.4.2 tag,
+the GTM dev file (`conversio_runtime_tag_v2.4.2.js`) and the self-hosted bundle
+(`self-hosted/public/runtime-tag.2.4.2.js`), so the two can't silently diverge.
 Since 2.4.1 the bundle is the comment-stripped build rather than a copy, which
 means the suite is verifying the exact bytes clients receive. A passing run looks
 like:
 
 ```
-conversio_runtime_tag_v2.4.1.js: 172 passed, 0 failed
-self-hosted/public/runtime-tag.2.4.1.js: 172 passed, 0 failed
+conversio_runtime_tag_v2.4.2.js: 172 passed, 0 failed
+self-hosted/public/runtime-tag.2.4.2.js: 172 passed, 0 failed
 
 TOTAL: 344 passed, 0 failed
 ```
@@ -68,9 +68,38 @@ node test/loader.test.js
 ```
 
 Both exit non-zero if anything fails, so they're safe to wire into CI. Earlier
-versions keep their own suites (`test/runtime-tag-2.4.test.js`,
-`test/runtime-tag-2.3.test.js`), which still pass and are worth keeping green
-while any client is pinned to those bundles.
+versions keep their own suites (`test/runtime-tag-2.4.1.test.js`,
+`test/runtime-tag-2.4.test.js`, `test/runtime-tag-2.3.test.js`), which still pass
+and are worth keeping green while any client is pinned to those bundles.
+
+### What it covers (2.4.2)
+
+Everything in 2.4.1 below, minus INP. 2.4.1 added it to `conversio_vitals`;
+2.4.2 takes it back out. It measures the page's own main-thread work rather than
+anything an experience changes, so the figure moved with whatever else a client
+shipped and never with us, and the few seconds this tag collects for left it
+`null` on most page loads anyway. `conversio_vitals` is `{lcp, fcp, cls, ps}`
+again.
+
+The section is written as a rollback check rather than deleted alongside the
+code, so the interaction fixtures stay in the harness and have to reach nothing:
+that the vitals object holds exactly `lcp`, `fcp`, `cls` and `ps` and no `inp`
+key at all; that neither of the fixture's interaction latencies turns up under
+some other key; that no `PerformanceObserver` registers for the `event` entry
+type or asks for a `durationThreshold`, so observing every interaction on the
+page is a cost that is gone rather than merely unreported; and that an
+interaction latency is no longer a successful collection on its own, a page whose
+only measurable entries are interactions now sending no vitals block and writing
+no snapshot.
+
+Two of them are about the version boundary rather than the removal, since a
+visitor can meet 2.4.2 mid-session with a 2.4.1 snapshot already in
+`sessionStorage`: an `inp` left in that snapshot is not forwarded to GA, the
+parameter being built from the vitals this version reports; and a snapshot whose
+only successful measurement was the interaction sends no vitals parameter at all
+rather than an `inp`-only one.
+
+Everything else 2.4.1 introduced is unchanged and still covered below.
 
 ### What it covers (2.4.1)
 
@@ -169,7 +198,7 @@ the JS served on every page of that client's site.
 ### Adding a new version
 
 When a new tag version needs its own suite, copy the pattern in
-`test/runtime-tag-2.4.1.test.js`: point `TAG_PATHS` at the new file(s) and reuse
+`test/runtime-tag-2.4.2.test.js`: point `TAG_PATHS` at the new file(s) and reuse
 `test/harness.js` as-is, since the harness itself is version-agnostic. Bump
 `BUNDLE_VERSION` in `test/loader.test.js` too, so the loader suite exercises
 the current bundle.

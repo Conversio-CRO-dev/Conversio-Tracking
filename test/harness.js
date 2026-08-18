@@ -30,10 +30,11 @@ var VITALS_FIXTURE = [
   { entryType: 'layout-shift', name: '', startTime: 100, value: 0.05, hadRecentInput: false },
   { entryType: 'layout-shift', name: '', startTime: 200, value: 0.02, hadRecentInput: false },
   { entryType: 'layout-shift', name: '', startTime: 300, value: 0.9, hadRecentInput: true },
-  // Two interactions, for INP. The first is one tap, whose three events share
-  // an interactionId and count as a single 40ms interaction (the longest of
-  // them, not their sum); the second is a slower keypress, so the page's worst
-  // interaction is 96ms.
+  // Two interactions. The first is one tap, whose three events share an
+  // interactionId and count as a single 40ms interaction (the longest of them,
+  // not their sum); the second is a slower keypress, so the page's worst
+  // interaction is 96ms. Measured by 2.4.1 as INP; kept here because 2.4.2,
+  // which removed that, has to prove none of it reaches the vitals object.
   { entryType: 'event', name: 'pointerdown', interactionId: 101, startTime: 800, duration: 24 },
   { entryType: 'event', name: 'pointerup', interactionId: 101, startTime: 810, duration: 40 },
   { entryType: 'event', name: 'click', interactionId: 101, startTime: 820, duration: 32 },
@@ -93,10 +94,16 @@ function runTag(opts) {
     ? opts.entries.slice()
     : ((cwv === 'ok') ? VITALS_FIXTURE.slice() : []);
 
+  // Every spec passed to observe(), in call order, so a test can assert on
+  // which entry types the tag registers for and with what options. Recorded
+  // before the unsupported-browser throw, since the tag asked either way.
+  var observedSpecs = [];
+
   function FakePerformanceObserver(cb) {
     this._cb = cb;
   }
   FakePerformanceObserver.prototype.observe = function (spec) {
+    observedSpecs.push(spec);
     if (cwv === 'observer-throws') throw new Error('observe unsupported');
     var self = this;
     var matching = entries.filter(function (e) { return e.entryType === spec.type; });
@@ -219,6 +226,7 @@ function runTag(opts) {
     local: localStore ? localStore._data : null,
     window: window,
     drain: drain,
+    observedSpecs: observedSpecs,
     gtagCalls: gtagCalls,
     queuedGtagCalls: queuedGtagCalls
   };
