@@ -29,7 +29,18 @@ var VITALS_FIXTURE = [
   { entryType: 'paint', name: 'first-contentful-paint', startTime: 456.7 },
   { entryType: 'layout-shift', name: '', startTime: 100, value: 0.05, hadRecentInput: false },
   { entryType: 'layout-shift', name: '', startTime: 200, value: 0.02, hadRecentInput: false },
-  { entryType: 'layout-shift', name: '', startTime: 300, value: 0.9, hadRecentInput: true }
+  { entryType: 'layout-shift', name: '', startTime: 300, value: 0.9, hadRecentInput: true },
+  // Two interactions, for INP. The first is one tap, whose three events share
+  // an interactionId and count as a single 40ms interaction (the longest of
+  // them, not their sum); the second is a slower keypress, so the page's worst
+  // interaction is 96ms.
+  { entryType: 'event', name: 'pointerdown', interactionId: 101, startTime: 800, duration: 24 },
+  { entryType: 'event', name: 'pointerup', interactionId: 101, startTime: 810, duration: 40 },
+  { entryType: 'event', name: 'click', interactionId: 101, startTime: 820, duration: 32 },
+  { entryType: 'event', name: 'keydown', interactionId: 202, startTime: 1200, duration: 96 },
+  // Not an interaction at all (interactionId 0), and slow enough to dominate
+  // INP if it were ever counted as one.
+  { entryType: 'event', name: 'pointermove', interactionId: 0, startTime: 900, duration: 500 }
 ];
 
 // opts:
@@ -38,6 +49,17 @@ var VITALS_FIXTURE = [
 //     exercising a transform the loader applies at serve time. tagPath is
 //     still required, as the script name in stack traces.
 //   cwv: 'ok' | 'unsupported' | 'observer-throws' | 'empty'
+//   entries: performance entries to serve instead of VITALS_FIXTURE (exported
+//     below, so a test can filter or extend it), for building a case the shared
+//     fixture doesn't cover. Honoured whatever cwv says, since the two control
+//     different things: cwv decides what the observer API does, this decides
+//     what there is to observe.
+//   perfTimeOrigin / perfNow: override the simulated high-resolution clock with
+//     a fixed number, so a test can reproduce the 100us clamping real browsers
+//     apply to it. Pass false to remove that property altogether, which is how
+//     a browser offering no high-resolution clock at all is simulated (the tag
+//     falls back to Date.now()); Core Web Vitals collection is unaffected
+//     either way, since it reads performance entries rather than the clock.
 //   localStorage: store or false (absent) or {throwOnRead/throwOnWrite}
 //   emissionEnabled: bool
 //   sessionInitial: seed object for sessionStorage
@@ -67,7 +89,9 @@ function runTag(opts) {
     ? null
     : makeStore(opts.localInitial, opts.localStorageOpts);
 
-  var entries = (cwv === 'ok') ? VITALS_FIXTURE.slice() : [];
+  var entries = opts.entries
+    ? opts.entries.slice()
+    : ((cwv === 'ok') ? VITALS_FIXTURE.slice() : []);
 
   function FakePerformanceObserver(cb) {
     this._cb = cb;
@@ -76,6 +100,11 @@ function runTag(opts) {
     if (cwv === 'observer-throws') throw new Error('observe unsupported');
     var self = this;
     var matching = entries.filter(function (e) { return e.entryType === spec.type; });
+    // As a real observer does: an entry shorter than the requested threshold is
+    // never delivered, which is what makes a fast interaction invisible.
+    if (typeof spec.durationThreshold === 'number') {
+      matching = matching.filter(function (e) { return e.duration >= spec.durationThreshold; });
+    }
     if (!matching.length) return;
     // buffered:true delivers synchronously-ish; queue it as a timer.
     timers.push({ at: 0, fn: function () {
@@ -95,6 +124,16 @@ function runTag(opts) {
       return entries.filter(function (e) { return e.entryType === t; });
     }
   };
+
+  if (typeof opts.perfTimeOrigin === 'number') performance.timeOrigin = opts.perfTimeOrigin;
+  if (opts.perfTimeOrigin === false) delete performance.timeOrigin;
+
+  if (typeof opts.perfNow === 'number') {
+    performance.now = (function (fixed) {
+      return function () { return fixed; };
+    })(opts.perfNow);
+  }
+  if (opts.perfNow === false) delete performance.now;
 
   var dataLayer = [];
 
@@ -185,4 +224,4 @@ function runTag(opts) {
   };
 }
 
-module.exports = { runTag: runTag, makeStore: makeStore };
+module.exports = { runTag: runTag, makeStore: makeStore, VITALS_FIXTURE: VITALS_FIXTURE };
