@@ -17,7 +17,7 @@ var runTag = require('./harness').runTag;
 var PUBLIC_DIR = path.join(__dirname, '..', 'self-hosted', 'public');
 // Only a label for stack traces; the source actually run is the Worker's output.
 var SERVED_LABEL = 'served-by-loader.js';
-var BUNDLE_VERSION = '2.4.1';
+var BUNDLE_VERSION = '2.5';
 var ORIGIN = 'https://tag.conversio.dev';
 var KEY = 'cvo_0123456789abcdefghij';
 
