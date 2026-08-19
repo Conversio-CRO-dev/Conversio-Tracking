@@ -112,7 +112,7 @@ node scripts/manage-keys.mjs issue --client "Acme Co"
 
 Optional flags:
 
-- `--version 2.4.2` pins that client to a specific bundle in `public/`. Useful
+- `--version 2.5` pins that client to a specific bundle in `public/`. Useful
   if a client needs to stay on an older version while others move forward.
   Note this defaults to `2.2`, not to the newest bundle present, so pass it
   explicitly when issuing a key for a current-version client. Same for
@@ -256,11 +256,47 @@ A client still pinned to 2.4.1 keeps sending it, which is worth knowing when
 comparing two clients' data. For responsiveness, use a CrUX or GA4 web-vitals
 report, which measures the whole page life rather than the first few seconds.
 
+**From 2.5 the client's own events go to the same property, as `client_cro`.**
+The tag runs two independent streams: ours, above, and the client's own, which
+they drive by pushing `client_experience` and `client_event` to the dataLayer (see
+the [Trigger events](../README.md#trigger-events) section in the repo README).
+Everything downstream is the same code, so a client send is shaped exactly like
+ours with the prefix swapped:
+
+| Parameter | From a client experience emit | From a client event emit |
+| --- | --- | --- |
+| `client_category` | `experience_category` | `event_category` |
+| `client_action` | `experience_action` | `event_action` |
+| `client_label` | `experience_label` | `event_label` |
+| `client_segment` | `experience_segment` | `event_segment` |
+| `client_experiences` | `sessionStorage.clientExperienceList` | same |
+| `client_events` | `sessionStorage.clientEventList` | same |
+
+Three things to know about it. It is a **separate GA4 event name**, so a client's
+own reporting never lands in the middle of ours: `client_cro` needs registering
+and marking up in their property in its own right, and an existing report built on
+`conversio_cro` will not pick it up. It carries **no identifier and no vitals**:
+the `conversio_id` identifies the visitor to us and the vitals measure the page,
+neither being the client's to report through their own events, so there is no
+`client_id` and no `client_data` anywhere. And the two streams **share no
+storage**, so the segment lists above hold only what was reported to that stream:
+a client segment never appears in `conversio_experiences`, and ours never appears
+in `client_experiences`.
+
+Consent covers both. `window.__conversioEnableEmission__()` opens the client
+stream alongside ours, so a consent platform needs no second call; the state is
+stored per stream (`conversioEmissionEnabled`, `clientEmissionEnabled`) so neither
+reads the other's key. The one boundary worth knowing: a visitor who consented
+earlier in the same session on a pre-2.5 bundle has our key set and no client key,
+so their client events are held until consent is signalled again rather than being
+dropped, and arrive in full when it is.
+
 **Routing is the part that needed care.** A bare `gtag('event', ...)` goes to
 every measurement ID configured in that gtag instance, so on a site running
 more than one GA4 property the event lands in all of them. Each send is pinned
 with `send_to` to the single property in that client's key record, so it can't
-leak into whichever property the site happened to configure last.
+leak into whichever property the site happened to configure last. Both streams
+send to that one property, it being the client's own either way.
 
 **The tag never calls `gtag('config', ...)`.** That property belongs to the
 client and their own tagging already configures it; configuring it again from
@@ -281,7 +317,7 @@ toggle in **Admin → Data display → Events**, switched on in the GA4 UI rathe
 than by the tag. Unmarking it is not retroactive: already-processed hits keep
 their key-event counts in historical reports, and only new hits stop counting.
 Worth checking on each new client property, since GA4 puts that toggle right
-beside every newly-seen event name.
+beside every newly-seen event name, `client_cro` included.
 
 Two limits worth designing around:
 
@@ -296,7 +332,7 @@ Two limits worth designing around:
   clients' data.
 - **GA4 truncates event parameter values at 100 characters.** The two segment
   lists will still pass that on a busy session and be cut silently, delimited or
-  not: dropping the JSON punctuation in 2.4.1 bought roughly one extra segment,
+  not, and `client_experiences` and `client_events` are subject to the same limit: dropping the JSON punctuation in 2.4.1 bought roughly one extra segment,
   not immunity. Five segments averaging 20 characters is already the ceiling. If
   you need the full lists, the alternative is sending a count plus the most
   recent few rather than the whole list.
@@ -336,7 +372,7 @@ From 2.4.1 on the bundle is built from the GTM copy rather than being a
 duplicate of it, so the first step is generating it:
 
 ```bash
-node scripts/build-bundle.mjs 2.4.2
+node scripts/build-bundle.mjs 2.5
 ```
 
 That takes `conversio_runtime_tag_<version>.js` from the repo root, drops the
@@ -366,7 +402,7 @@ once, and the deploy itself is not the risky step.
 Moving one client over is the risky step, and it's one command:
 
 ```bash
-node scripts/manage-keys.mjs update cvo_xxxxxxxxxxxxxxxxxxxxxxxx --version 2.4.2
+node scripts/manage-keys.mjs update cvo_xxxxxxxxxxxxxxxxxxxxxxxx --version 2.5
 ```
 
 Rolling that client back is the same command with the old version, taking

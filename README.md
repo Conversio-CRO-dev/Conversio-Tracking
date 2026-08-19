@@ -19,7 +19,7 @@ plus the tooling around it.
   Edit the GTM file, never the bundle, and rebuild:
 
   ```bash
-  cd self-hosted && node scripts/build-bundle.mjs 2.4.2
+  cd self-hosted && node scripts/build-bundle.mjs 2.5
   ```
 
   `--check` instead exits non-zero if the committed bundle is stale, so it can
@@ -29,22 +29,58 @@ plus the tooling around it.
 
 ## Trigger events
 
-The tag is driven by two dataLayer events the client's container pushes, each
-carrying a `conversio` payload object: an experience (`experience_segment`,
-`experience_category`, `experience_action`, `experience_label`) and an event
-(`event_segment` and the same three). Both are accepted under two names:
+The tag is driven by dataLayer events the client's container pushes: an
+experience (`experience_segment`, `experience_category`, `experience_action`,
+`experience_label`) and an event (`event_segment` and the same three).
 
-| Pushes | Names accepted |
-| --- | --- |
-| an experience | `conversioExperience`, `conversio_experience` |
-| an event | `conversioEvent`, `conversio_event` |
+From 2.5 there are **two independent streams of them**. The Conversio stream is
+ours, reporting what our experiences do. The client stream is the client's own,
+so they can report their experiences and events through the same tag and have
+them arrive in GA4 shaped identically. Each stream has its own trigger names, its
+own payload key, and its own storage:
 
-The snake_case pair arrived in 2.4.2 and is where the naming is heading; the
-camelCase pair is what every client pushes today and stays supported. Nothing
-downstream of the match knows which name arrived, so a container can move over
-whenever it does, and one part-way through the move can push each.
+| Pushes | Names accepted | Payload key |
+| --- | --- | --- |
+| a Conversio experience | `conversioExperience`, `conversio_experience` | `conversio` |
+| a Conversio event | `conversioEvent`, `conversio_event` | `conversio` |
+| a client experience | `client_experience` | `client` |
+| a client event | `client_event` | `client` |
 
-What a container must not do is push both names for the same occurrence.
+```js
+// Conversio's own, either name
+dataLayer.push({ event: 'conversio_experience', conversio: {
+  experience_segment: 'homepage-hero-v2', experience_category: 'Homepage',
+  experience_action: 'Hero test', experience_label: 'Variant B'
+}});
+
+// the client's own
+dataLayer.push({ event: 'client_event', client: {
+  event_segment: 'newsletter-signup', event_category: 'Newsletter',
+  event_action: 'Signup', event_label: 'Footer form'
+}});
+```
+
+The payload key is part of the match, so a `client_experience` carrying a
+`conversio` payload is not a trigger, and neither is the reverse. The two streams
+share no storage: a segment reported to one is invisible to the other, and each
+keeps its own map, list, fired set and buffer. What the client stream does not
+have is an identity of its own: there is no `client_id` and no `client_data`, and
+a client send carries neither the `conversio_id` nor the vitals. See
+[the self-hosted README](self-hosted/README.md) for what each stream sends to
+GA4.
+
+Consent is one control for both, `window.__conversioEnableEmission__()` as
+before: it is a fact about the visitor rather than about a stream, so a consent
+platform needs no second call. The state is stored per stream, so neither reads
+the other's key.
+
+On the Conversio names, the snake_case pair arrived in 2.4.2 and is where the
+naming is heading; the camelCase pair is what every client pushes today and stays
+supported. Nothing downstream of the match knows which name arrived, so a
+container can move over whenever it does, and one part-way through the move can
+push each. The client stream is new and accepts the snake_case name only.
+
+What a container must not do is push two accepted names for the same occurrence.
 Experiences would survive it, being de-duplicated by segment, but an event is one
 instance per push and a second push is a second instance.
 
@@ -62,21 +98,21 @@ installs are required, only Node itself.
 Run the suite for the current version with:
 
 ```bash
-node test/runtime-tag-2.4.2.test.js
+node test/runtime-tag-2.5.test.js
 ```
 
-This runs the same set of checks against both shipped copies of the 2.4.2 tag,
-the GTM dev file (`conversio_runtime_tag_v2.4.2.js`) and the self-hosted bundle
-(`self-hosted/public/runtime-tag.2.4.2.js`), so the two can't silently diverge.
+This runs the same set of checks against both shipped copies of the 2.5 tag,
+the GTM dev file (`conversio_runtime_tag_v2.5.js`) and the self-hosted bundle
+(`self-hosted/public/runtime-tag.2.5.js`), so the two can't silently diverge.
 Since 2.4.1 the bundle is the comment-stripped build rather than a copy, which
 means the suite is verifying the exact bytes clients receive. A passing run looks
 like:
 
 ```
-conversio_runtime_tag_v2.4.2.js: 188 passed, 0 failed
-self-hosted/public/runtime-tag.2.4.2.js: 188 passed, 0 failed
+conversio_runtime_tag_v2.5.js: 242 passed, 0 failed
+self-hosted/public/runtime-tag.2.5.js: 242 passed, 0 failed
 
-TOTAL: 376 passed, 0 failed
+TOTAL: 484 passed, 0 failed
 ```
 
 There's a second suite for the self-hosted loader Worker, which runs it against
@@ -89,9 +125,53 @@ node test/loader.test.js
 ```
 
 Both exit non-zero if anything fails, so they're safe to wire into CI. Earlier
-versions keep their own suites (`test/runtime-tag-2.4.1.test.js`,
-`test/runtime-tag-2.4.test.js`, `test/runtime-tag-2.3.test.js`), which still pass
-and are worth keeping green while any client is pinned to those bundles.
+versions keep their own suites (`test/runtime-tag-2.4.2.test.js`,
+`test/runtime-tag-2.4.1.test.js`, `test/runtime-tag-2.4.test.js`,
+`test/runtime-tag-2.3.test.js`), which still pass and are worth keeping green
+while any client is pinned to those bundles.
+
+### What it covers (2.5)
+
+Everything in 2.4.2 below, which is the point of most of it: both streams are now
+driven by one set of functions taking a stream descriptor rather than by a single
+hard-coded path, so all 188 checks of the 2.4.2 suite are inherited unchanged and
+double as the regression check on that refactoring. They all describe the
+Conversio stream, and 2.5 must not have moved it. Two of them go further and
+compare a page with client pushes against one without: our side of
+`sessionStorage` and our `conversio_cro` sends must come out identical, bar the
+random id.
+
+Then the client stream itself. That it mirrors ours: a `client_experience` emits
+one `client_experience_session` carrying its payload under a `client` key, a
+`client_event` emits one `client_event_instance`, and each sends one `client_cro`
+whose parameter object is compared in full, so a key appearing there that
+shouldn't fails rather than passing unnoticed. That it inherits our
+de-duplication, an experience reported once per segment and an event once per
+push, because it is the same code. That a segment-less push is ignored, that the
+init sweep of the dataLayer picks up client triggers as well as the push hook
+does, and that the payload key is part of the match, so neither stream can be
+triggered with the other's payload object. That camelCase client names are not
+triggers, there being no legacy container to support.
+
+That the two share nothing: a list holds only its own stream's segments, the
+client keys are exactly the five expected, no key belongs to both namespaces, one
+segment name reported to both streams is two separate reports, and a fired set on
+one side does not silence the other.
+
+That the client stream has no identity: no `conversio_id` and no `client_id` on a
+client send, no parameter ending in `_id` at all, no vitals parameter even with a
+snapshot sitting in storage to carry, no `client_data` event, `localStorage`
+holding the one `conversio_id` and nothing else, and a client send still going out
+when `localStorage` is missing entirely, since the stream never touches it.
+
+And that consent is one control for two gates: nothing client-shaped emitted or
+sent before consent, the event buffered against its own key meanwhile, one enable
+call writing both keys and flushing both streams, a second flush emitting nothing
+further, one disable call closing both. Last, the version boundary: a visitor who
+consented on a 2.4.2 page earlier in the same session has our key set and no
+client key, so their client events wait for consent to be signalled again rather
+than being dropped, and arrive in full when it is, without re-emitting the
+experience our stream already reported.
 
 ### What it covers (2.4.2)
 
@@ -234,7 +314,7 @@ the JS served on every page of that client's site.
 ### Adding a new version
 
 When a new tag version needs its own suite, copy the pattern in
-`test/runtime-tag-2.4.2.test.js`: point `TAG_PATHS` at the new file(s) and reuse
+`test/runtime-tag-2.5.test.js`: point `TAG_PATHS` at the new file(s) and reuse
 `test/harness.js` as-is, since the harness itself is version-agnostic. Bump
 `BUNDLE_VERSION` in `test/loader.test.js` too, so the loader suite exercises
 the current bundle.
