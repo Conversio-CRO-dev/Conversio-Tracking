@@ -19,7 +19,7 @@ plus the tooling around it.
   Edit the GTM file, never the bundle, and rebuild:
 
   ```bash
-  cd self-hosted && node scripts/build-bundle.mjs 2.5
+  cd self-hosted && node scripts/build-bundle.mjs 2.5.1
   ```
 
   `--check` instead exits non-zero if the committed bundle is stale, so it can
@@ -98,21 +98,21 @@ installs are required, only Node itself.
 Run the suite for the current version with:
 
 ```bash
-node test/runtime-tag-2.5.test.js
+node test/runtime-tag-2.5.1.test.js
 ```
 
-This runs the same set of checks against both shipped copies of the 2.5 tag,
-the GTM dev file (`conversio_runtime_tag_v2.5.js`) and the self-hosted bundle
-(`self-hosted/public/runtime-tag.2.5.js`), so the two can't silently diverge.
+This runs the same set of checks against both shipped copies of the 2.5.1 tag,
+the GTM dev file (`conversio_runtime_tag_v2.5.1.js`) and the self-hosted bundle
+(`self-hosted/public/runtime-tag.2.5.1.js`), so the two can't silently diverge.
 Since 2.4.1 the bundle is the comment-stripped build rather than a copy, which
 means the suite is verifying the exact bytes clients receive. A passing run looks
 like:
 
 ```
-conversio_runtime_tag_v2.5.js: 242 passed, 0 failed
-self-hosted/public/runtime-tag.2.5.js: 242 passed, 0 failed
+conversio_runtime_tag_v2.5.1.js: 261 passed, 0 failed
+self-hosted/public/runtime-tag.2.5.1.js: 261 passed, 0 failed
 
-TOTAL: 484 passed, 0 failed
+TOTAL: 522 passed, 0 failed
 ```
 
 There's a second suite for the self-hosted loader Worker, which runs it against
@@ -125,10 +125,59 @@ node test/loader.test.js
 ```
 
 Both exit non-zero if anything fails, so they're safe to wire into CI. Earlier
-versions keep their own suites (`test/runtime-tag-2.4.2.test.js`,
-`test/runtime-tag-2.4.1.test.js`, `test/runtime-tag-2.4.test.js`,
-`test/runtime-tag-2.3.test.js`), which still pass and are worth keeping green
-while any client is pinned to those bundles.
+versions keep their own suites (`test/runtime-tag-2.5.test.js`,
+`test/runtime-tag-2.4.2.test.js`, `test/runtime-tag-2.4.1.test.js`,
+`test/runtime-tag-2.4.test.js`, `test/runtime-tag-2.3.test.js`), which still pass
+and are worth keeping green while any client is pinned to those bundles.
+
+### What it covers (2.5.1)
+
+Everything in 2.5 below, plus when collection closes and how a load nobody
+watched is reported.
+
+The load this was written for is a real one. A page opened into a background tab
+is not painted until the visitor looks at it, so the browser produced its first
+contentful paint at 1864ms, nearly a second *after* the load event at 920ms,
+where 2.5 closed collection on the first idle period after load and reported
+`lcp` and `fcp` as null on a page that had not drawn a pixel. `ps` was correct
+throughout, which is the tell: the block was there, so something had measured.
+
+Collection now waits while nothing has painted, re-trying ten times at 500ms
+inside the existing 6s hard timeout, and the suite pins both halves of that: on
+the background load, `conversio_data` has not fired a second in, and when it does
+fire it carries `fcp: 1864` rather than a null. A page that had already painted
+when the tag looked is not held up at all, and a page that never paints, a
+background tab the visitor never opens, still reports on the hard timeout with
+the nulls that are genuinely all there is, because a deferred close must never
+become a lost one.
+
+Then the `vis` marker, which is why a null paint timing can now be read. No
+browser reports an LCP for a load that started hidden, so that null means
+"could not be measured" where elsewhere it means "failed to measure", and the
+timings that do arrive are anchored to the moment the visitor looked rather than
+to navigation, which would skew any average they were included in. `vis:0` marks
+such a load and nothing else does: a load that started visible carries no key at
+all, nor does one the visitor hid later, the marker following the visibility at
+navigation rather than at whenever the tag happened to look. The `visibility-state`
+entries are consulted first as the authoritative record, with
+`document.visibilityState` as the fallback where a browser keeps none, and both
+paths are covered. `vis` is a marker rather than a measurement, so it cannot make
+an empty collection worth reporting: a hidden load that measured nothing still
+sends no vitals block.
+
+Last, the fallback for a measurement the observers never delivered now asks for
+each entry type directly rather than walking the whole timeline, since
+`getEntries()` carries the paint entries but not the largest-contentful-paint
+ones, so the old scan for the latter could never have found it. Which types a
+browser exposes to a synchronous read differs between browsers, so what the suite
+pins is that a dead observer still yields whatever the timeline holds.
+
+The harness gained a virtual clock for this: a timer carries the time it is due
+rather than a delay, an entry held back by `entryDelays` is absent from the
+timeline until its moment arrives, and `drain({ until: ms })` stops at a point in
+virtual time. Without it, every timer fired in one pass whatever its delay, so a
+callback that waits and asks again could not be told apart from one that gives up
+immediately. All five earlier suites pass against it unchanged.
 
 ### What it covers (2.5)
 
@@ -314,7 +363,7 @@ the JS served on every page of that client's site.
 ### Adding a new version
 
 When a new tag version needs its own suite, copy the pattern in
-`test/runtime-tag-2.5.test.js`: point `TAG_PATHS` at the new file(s) and reuse
+`test/runtime-tag-2.5.1.test.js`: point `TAG_PATHS` at the new file(s) and reuse
 `test/harness.js` as-is, since the harness itself is version-agnostic. Bump
 `BUNDLE_VERSION` in `test/loader.test.js` too, so the loader suite exercises
 the current bundle.
