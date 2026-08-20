@@ -112,7 +112,7 @@ node scripts/manage-keys.mjs issue --client "Acme Co"
 
 Optional flags:
 
-- `--version 2.5` pins that client to a specific bundle in `public/`. Useful
+- `--version 2.5.1` pins that client to a specific bundle in `public/`. Useful
   if a client needs to stay on an older version while others move forward.
   Note this defaults to `2.2`, not to the newest bundle present, so pass it
   explicitly when issuing a key for a current-version client. Same for
@@ -229,6 +229,10 @@ from 2.4.1 on:
 conversio_experiences   homepage-hero-v2,pricing-annual-toggle,nav-sticky-cta
 conversio_events        cta-click,scroll-50
 conversio_vitals        lcp:1834.6,fcp:612.7,cls:0.071,ps:2731
+
+conversio_vitals        fcp:1864,cls:0.004,ps:920,vis:0
+                        the same parameter on a load that started in a
+                        background tab: no lcp is possible there, vis:0 says so
 ```
 
 Split on `,` to read a list, and on `:` for a vitals pair. Nothing in GA4 parses
@@ -239,13 +243,34 @@ arrive as JSON (`["homepage-hero-v2",...]`), which is worth knowing when
 comparing two clients on different versions.
 
 `conversio_vitals` reports `lcp`, `fcp`, `cls` and `ps` in that order, in
-milliseconds except `cls` (unitless). A measurement that failed is left out
+milliseconds except `cls` (unitless), plus `vis` from 2.5.1 (see below). A measurement that failed is left out
 rather than sent as null, so a short string means less was measured, not that
 something is broken. Paint timings are rounded to one decimal and `cls` to
 three: an unrounded `1834.5999999046326` spends a fifth of the parameter on
 precision the clock never had, browsers clamping these to 100us. The
 `conversio_data` dataLayer event still carries the raw numbers as a real object,
 so nothing is lost by the rounding.
+
+**`vis:0` means the load started in a background tab, from 2.5.1 on.** A page
+opened into a tab the visitor is not looking at is not painted until they look,
+so its paint timings are anchored to that moment rather than to navigation, and no
+browser reports an LCP for such a load at all. Without the marker, that missing
+`lcp` is indistinguishable from a measurement that failed, and the timings that
+do arrive skew any average they are included in. So a load that did not start
+visible carries `vis:0`, and one that did carries no `vis` at all, the same way a
+successful measurement carries no marker. **Filter `vis:0` out of paint-timing
+averages**, and keep it for volume: on a real client site a meaningful share of
+traffic arrives this way, from search results opened in background tabs and
+sessions restored on browser start.
+
+2.5.1 also stopped closing collection before the page had painted. Up to 2.5,
+collection ended on the first idle period after the load event, which on a
+background-tab load is before the first paint, so `lcp` and `fcp` came back null
+while `ps` was correct. It now waits while nothing has painted, up to the same
+6s ceiling, which means a slightly later `conversio_data` on those loads and no
+change at all on a page that has already painted. A client pinned to 2.5 or
+earlier keeps reporting the nulls, which is worth knowing when comparing two
+clients' paint timings.
 
 **There is no `inp`.** 2.4.1 added Interaction to Next Paint and 2.4.2 removed it
 again: responsiveness is a property of the page's own main-thread work rather
@@ -372,7 +397,7 @@ From 2.4.1 on the bundle is built from the GTM copy rather than being a
 duplicate of it, so the first step is generating it:
 
 ```bash
-node scripts/build-bundle.mjs 2.5
+node scripts/build-bundle.mjs 2.5.1
 ```
 
 That takes `conversio_runtime_tag_<version>.js` from the repo root, drops the
@@ -402,7 +427,7 @@ once, and the deploy itself is not the risky step.
 Moving one client over is the risky step, and it's one command:
 
 ```bash
-node scripts/manage-keys.mjs update cvo_xxxxxxxxxxxxxxxxxxxxxxxx --version 2.5
+node scripts/manage-keys.mjs update cvo_xxxxxxxxxxxxxxxxxxxxxxxx --version 2.5.1
 ```
 
 Rolling that client back is the same command with the old version, taking

@@ -50,6 +50,13 @@ var VITALS_FIXTURE = [
 //     exercising a transform the loader applies at serve time. tagPath is
 //     still required, as the script name in stack traces.
 //   cwv: 'ok' | 'unsupported' | 'observer-throws' | 'empty'
+//   visibilityState: what document.visibilityState reads, 'visible' by default.
+//     Only consulted by a tag that has no visibility-state entry to go on, the
+//     entries being the authoritative record where a browser keeps them.
+//   entryDelays: { <entryType>: ms } holds a buffered observer delivery back
+//     until that point in virtual time, for reproducing a measurement a real
+//     browser would not have produced yet. Anything not listed is delivered
+//     immediately, as before.
 //   entries: performance entries to serve instead of VITALS_FIXTURE (exported
 //     below, so a test can filter or extend it), for building a case the shared
 //     fixture doesn't cover. Honoured whatever cwv says, since the two control
@@ -69,7 +76,9 @@ var VITALS_FIXTURE = [
 //     the sweep of what is already there is exercised rather than only the
 //     push hook
 //   autoDrain: false leaves pending timers/callbacks undrained, so a test can
-//     interleave consent with CWV collection finishing
+//     interleave consent with CWV collection finishing. The returned drain also
+//     takes { until: ms }, which stops at that point in virtual time rather than
+//     running everything, for asking what the tag had reported by then.
 //   presetSettings: seeds window.conversioSettings before the tag runs, as if
 //     another tag on the page had got there first
 //   gtag: 'spy' installs a window.gtag that records calls (the path taken when
@@ -81,6 +90,13 @@ function runTag(opts) {
   if (!opts.tagPath) throw new Error('runTag requires opts.tagPath');
   var cwv = opts.cwv || 'ok';
 
+  // Virtual time, in milliseconds since the tag ran. Timers carry the time they
+  // are due and drain runs them in that order, advancing the clock, so a
+  // callback that arms another timer is scheduled after the first rather than
+  // alongside it. Sequence numbers keep two timers due at the same moment in the
+  // order they were armed.
+  var clock = 0;
+  var timerSeq = 0;
   var timers = [];
   var idleCallbacks = [];
   var loadListeners = [];
@@ -102,6 +118,18 @@ function runTag(opts) {
   // before the unsupported-browser throw, since the tag asked either way.
   var observedSpecs = [];
 
+  // When an entry type exists in the timeline. An entry a real browser has not
+  // produced yet cannot be read synchronously either, so a delayed type is
+  // absent from getEntries until the clock reaches it: without this, a page that
+  // has not painted would still hand a paint entry to anything that asked.
+  function entryAvailableAt(entry) {
+    return (opts.entryDelays && opts.entryDelays[entry.entryType]) || 0;
+  }
+
+  function availableEntries() {
+    return entries.filter(function (e) { return entryAvailableAt(e) <= clock; });
+  }
+
   function FakePerformanceObserver(cb) {
     this._cb = cb;
   }
@@ -116,8 +144,12 @@ function runTag(opts) {
       matching = matching.filter(function (e) { return e.duration >= spec.durationThreshold; });
     }
     if (!matching.length) return;
-    // buffered:true delivers synchronously-ish; queue it as a timer.
-    timers.push({ at: 0, fn: function () {
+    // buffered:true delivers synchronously-ish, so the default is immediate.
+    // entryDelays holds the delivery back for an entry type that a real browser
+    // would not have produced yet, a paint on a page loaded in a background tab
+    // being the case worth simulating.
+    var delay = (opts.entryDelays && opts.entryDelays[spec.type]) || 0;
+    timers.push({ due: clock + delay, seq: timerSeq++, fn: function () {
       self._cb({ getEntries: function () { return matching; } });
     } });
   };
@@ -126,12 +158,12 @@ function runTag(opts) {
   var performance = {
     timeOrigin: 1785492847123.456,
     now: function () { return 1500.25; },
-    getEntries: function () { return entries; },
+    getEntries: function () { return availableEntries(); },
     getEntriesByType: function (t) {
       if (t === 'navigation') {
         return (cwv === 'ok') ? [{ loadEventEnd: 2000, startTime: 0 }] : [];
       }
-      return entries.filter(function (e) { return e.entryType === t; });
+      return availableEntries().filter(function (e) { return e.entryType === t; });
     }
   };
 
@@ -168,7 +200,10 @@ function runTag(opts) {
     performance: performance,
     Uint8Array: Uint8Array,
     crypto: { getRandomValues: crypto.randomFillSync },
-    setTimeout: function (fn, ms) { timers.push({ at: ms || 0, fn: fn }); return timers.length; },
+    setTimeout: function (fn, ms) {
+      timers.push({ due: clock + (ms || 0), seq: timerSeq++, fn: fn });
+      return timers.length;
+    },
     addEventListener: function (name, fn) { if (name === 'load') loadListeners.push(fn); },
     requestIdleCallback: function (fn) { idleCallbacks.push(fn); }
   };
@@ -200,7 +235,10 @@ function runTag(opts) {
   }
 
   sandbox.window = window;
-  sandbox.document = { readyState: opts.readyState || 'complete' };
+  sandbox.document = {
+    readyState: opts.readyState || 'complete',
+    visibilityState: opts.visibilityState || 'visible'
+  };
   sandbox.setTimeout = window.setTimeout;
   window.window = window;
 
@@ -211,15 +249,70 @@ function runTag(opts) {
   var context = vm.createContext(sandbox);
   vm.runInContext(source, context, { filename: opts.tagPath });
 
-  function drain() {
+  // The next timer due at or before the limit, earliest first.
+  function nextDueTimer(limit) {
+    var best = -1;
+    var i;
+
+    for (i = 0; i < timers.length; i++) {
+      if (timers[i].due > limit) continue;
+      if (best === -1 ||
+          timers[i].due < timers[best].due ||
+          (timers[i].due === timers[best].due && timers[i].seq < timers[best].seq)) {
+        best = i;
+      }
+    }
+
+    return best;
+  }
+
+  // Runs everything the page has waiting. An idle callback is treated as due
+  // straight away, which is what a browser does with an idle main thread and is
+  // what makes it beat a timer armed for seconds later.
+  //
+  // opts.until stops the drain at a point in virtual time, leaving anything due
+  // after it queued, so a test can ask what the tag had reported by then.
+  function drain(drainOpts) {
+    var limit = (drainOpts && typeof drainOpts.until === 'number')
+      ? drainOpts.until
+      : Infinity;
     var guard = 0;
-    while ((timers.length || idleCallbacks.length || loadListeners.length) && guard++ < 500) {
-      var ls = loadListeners.splice(0, loadListeners.length);
-      ls.forEach(function (fn) { try { fn(); } catch (e) {} });
-      var ts = timers.splice(0, timers.length).sort(function (a, b) { return a.at - b.at; });
-      ts.forEach(function (t) { try { t.fn(); } catch (e) {} });
-      var ic = idleCallbacks.splice(0, idleCallbacks.length);
-      ic.forEach(function (fn) { try { fn(); } catch (e) {} });
+    var index;
+    var timer;
+    var ls;
+    var ic;
+
+    while (guard++ < 5000) {
+      if (loadListeners.length) {
+        ls = loadListeners.splice(0, loadListeners.length);
+        ls.forEach(function (fn) { try { fn(); } catch (e) {} });
+        continue;
+      }
+
+      // Anything already due runs before the main thread counts as idle, which
+      // is the order a browser uses: an idle callback waits behind the tasks
+      // that are queued, a buffered observer delivery among them.
+      index = nextDueTimer(Math.min(clock, limit));
+      if (index !== -1) {
+        timer = timers.splice(index, 1)[0];
+        try { timer.fn(); } catch (e) {}
+        continue;
+      }
+
+      if (idleCallbacks.length) {
+        ic = idleCallbacks.splice(0, idleCallbacks.length);
+        ic.forEach(function (fn) { try { fn(); } catch (e) {} });
+        continue;
+      }
+
+      // Nothing left to do at this instant, so move the clock on to whatever
+      // is waiting next.
+      index = nextDueTimer(limit);
+      if (index === -1) return;
+
+      timer = timers.splice(index, 1)[0];
+      if (timer.due > clock) clock = timer.due;
+      try { timer.fn(); } catch (e) {}
     }
   }
 
