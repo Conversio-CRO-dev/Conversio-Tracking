@@ -41,6 +41,13 @@
 // dropped rather than reported as 'undefined', and that what it pushes is
 // processed by the same machinery as any other conversio_experience.
 //
+// Section 26 covers the other half of it: the conversio_experience flag, which
+// chooses whether the helper reports to our stream or to the client's. It
+// reaches the event name and the payload key and nothing else, so the section
+// pins the envelope against the derivation, that the absent flag still reports
+// to ours, and that the two streams stay as separate downstream of the helper
+// as they are for any other experience.
+//
 // Usage: node test/runtime-tag-2.6.test.js
 'use strict';
 
@@ -1981,6 +1988,7 @@ function runSuite(tagPath, label) {
         }
       };
       if ('sample' in opts) r.window.conversio_sample = opts.sample;
+      if ('stream' in opts) r.window.conversio_experience = opts.stream;
 
       returned = r.window.conversioAbtastyTracking(
         'testId' in opts ? opts.testId : '12345'
@@ -1990,10 +1998,11 @@ function runSuite(tagPath, label) {
       return {
         returned: returned,
         pushed: r.dataLayer.slice(before).filter(function (e) {
-          return e && e.event === 'conversio_experience';
+          return e && (e.event === 'conversio_experience' || e.event === 'client_experience');
         }),
         emitted: r.dataLayer.slice(before).filter(function (e) {
-          return e && e.event === 'conversio_experience_session';
+          return e && (e.event === 'conversio_experience_session' ||
+                       e.event === 'client_experience_session');
         }),
         session: r.session,
         window: r.window,
@@ -2007,15 +2016,22 @@ function runSuite(tagPath, label) {
       typeof exposed.window.conversioAbtastyTracking === 'function',
       typeof exposed.window.conversioAbtastyTracking);
 
+    // The payload, off whichever key the stream it went to uses.
+    function payload(r) {
+      var item = r.pushed[0];
+      if (!item) return null;
+      return item.conversio || item.client || null;
+    }
+
     // The unsampled path, end to end.
     (function () {
       var r = call({ tests: tests('ABC | Homepage hero', 'Variation 2 | blue button') });
-      var p = r.pushed[0] && r.pushed[0].conversio;
+      var p = payload(r);
       check('unsampled: returns true', r.returned === true, String(r.returned));
       check('unsampled: one conversio_experience pushed', r.pushed.length === 1, 'got ' + r.pushed.length);
       check('unsampled: segment is code plus variation number',
         !!p && p.experience_segment === 'ABC.XV2', JSON.stringify(p));
-      check('unsampled: category is fixed',
+      check('unsampled: category is fixed for our stream',
         !!p && p.experience_category === 'Conversio Experience', JSON.stringify(p));
       check('unsampled: action is code, id and campaign name',
         !!p && p.experience_action === 'ABC | 12345 | ABC | Homepage hero', JSON.stringify(p));
@@ -2049,7 +2065,7 @@ function runSuite(tagPath, label) {
      ['Variation', 'ABC'],
      ['Some other name | a', 'ABC']].forEach(function (pair) {
       var r = call({ tests: tests('ABC | Homepage hero', pair[0]) });
-      var p = r.pushed[0] && r.pushed[0].conversio;
+      var p = payload(r);
       check("variation '" + pair[0] + "' gives segment " + pair[1],
         !!p && p.experience_segment === pair[1],
         p && p.experience_segment);
@@ -2062,7 +2078,7 @@ function runSuite(tagPath, label) {
         sample: flag,
         tests: tests('Sample | ABC | Homepage hero', 'Variation 2 | blue button')
       });
-      var p = r.pushed[0] && r.pushed[0].conversio;
+      var p = payload(r);
       check('sample flag ' + JSON.stringify(flag) + ': code from the second segment, marked .S',
         !!p && p.experience_segment === 'ABC.XV2.S', JSON.stringify(p));
     });
@@ -2074,7 +2090,7 @@ function runSuite(tagPath, label) {
         sample: flag,
         tests: tests('ABC | Homepage hero', 'Original')
       });
-      var p = r.pushed[0] && r.pushed[0].conversio;
+      var p = payload(r);
       check('sample flag ' + JSON.stringify(flag) + ' reads as unsampled',
         !!p && p.experience_segment === 'ABC.XCO', p && p.experience_segment);
     });
@@ -2091,7 +2107,7 @@ function runSuite(tagPath, label) {
       // named with only two parts yields the test name as its code, which is
       // the convention being wrong rather than this function guessing at it.
       var twoPart = call({ sample: true, tests: tests('ABC | Homepage hero', 'Original') });
-      var tp = twoPart.pushed[0] && twoPart.pushed[0].conversio;
+      var tp = payload(twoPart);
       check('sampled two-part name takes its second segment as the code',
         !!tp && tp.experience_segment === 'Homepage hero.XCO.S', JSON.stringify(tp));
 
@@ -2179,6 +2195,255 @@ function runSuite(tagPath, label) {
       r.drain();
       check('post-consent: the held experience is emitted',
         r.dataLayer.filter(function (e) { return e && e.event === 'conversio_experience_session'; }).length === 1);
+    })();
+  })();
+
+  // 26. conversioAbtastyTracking: which stream the experience is reported to
+  //
+  // The conversio_experience flag on the window chooses, and it reaches only the
+  // event name and the payload key: the segment is derived before the stream is
+  // consulted, so the same test reports the same segment either way.
+  (function () {
+    function tests(name, variationName) {
+      return { '12345': { name: name, variationName: variationName } };
+    }
+
+    // Runs the tag, sets the flags a calling test would, and reports where the
+    // experience landed.
+    function route(opts) {
+      opts = opts || {};
+      var r = tag(consented({}));
+      var before = r.dataLayer.length;
+
+      r.window.ABTasty = {
+        getTestsOnPage: function () {
+          return tests('ABC | Homepage hero', 'Variation 2 | blue button');
+        }
+      };
+      if ('stream' in opts) r.window.conversio_experience = opts.stream;
+      if ('sample' in opts) r.window.conversio_sample = opts.sample;
+
+      var returned = r.window.conversioAbtastyTracking('12345');
+      r.drain();
+
+      var fresh = r.dataLayer.slice(before);
+      var pushed = fresh.filter(function (e) {
+        return e && (e.event === 'conversio_experience' || e.event === 'client_experience');
+      })[0];
+
+      return {
+        returned: returned,
+        event: pushed && pushed.event,
+        keys: pushed ? Object.keys(pushed).filter(function (k) {
+          return k.indexOf('__') !== 0;
+        }).sort() : [],
+        marks: pushed ? Object.keys(pushed).filter(function (k) {
+          return k.indexOf('__') === 0;
+        }).sort() : [],
+        payload: pushed && (pushed.conversio || pushed.client),
+        emits: fresh.filter(function (e) {
+          return e && (e.event === 'conversio_experience_session' ||
+                       e.event === 'client_experience_session');
+        }).map(function (e) { return e.event; }),
+        session: r.session
+      };
+    }
+
+    // Explicitly true, and every absent-or-not-false spelling, report to our own
+    // stream. The absent case is the one that matters: a test written against
+    // the helper before this flag existed must keep reporting where it did.
+    [['flag absent', {}],
+     ['flag true', { stream: true }],
+     ['flag the string "true"', { stream: 'true' }],
+     ['flag undefined', { stream: undefined }],
+     ['flag null', { stream: null }],
+     ['flag 0', { stream: 0 }],
+     ['flag the empty string', { stream: '' }]].forEach(function (pair) {
+      var r = route(pair[1]);
+      check(pair[0] + ': pushes conversio_experience',
+        r.event === 'conversio_experience', String(r.event));
+      check(pair[0] + ': under the conversio payload key',
+        JSON.stringify(r.keys) === JSON.stringify(['conversio', 'event']),
+        JSON.stringify(r.keys));
+      check(pair[0] + ': marked processed by our stream only',
+        JSON.stringify(r.marks) === JSON.stringify(['__conversioExperienceRuntimeProcessed__']),
+        JSON.stringify(r.marks));
+      check(pair[0] + ': categorised Conversio Experience',
+        r.payload && r.payload.experience_category === 'Conversio Experience',
+        r.payload && r.payload.experience_category);
+    });
+
+    // Explicitly false, in either spelling, reports to the client's.
+    [['flag false', { stream: false }],
+     ['flag the string "false"', { stream: 'false' }]].forEach(function (pair) {
+      var r = route(pair[1]);
+      check(pair[0] + ': pushes client_experience',
+        r.event === 'client_experience', String(r.event));
+      check(pair[0] + ': under the client payload key',
+        JSON.stringify(r.keys) === JSON.stringify(['client', 'event']),
+        JSON.stringify(r.keys));
+      check(pair[0] + ': and no conversio key alongside it',
+        r.keys.indexOf('conversio') === -1, JSON.stringify(r.keys));
+      check(pair[0] + ': marked processed by the client stream only',
+        JSON.stringify(r.marks) === JSON.stringify(['__clientExperienceRuntimeProcessed__']),
+        JSON.stringify(r.marks));
+      check(pair[0] + ': categorised Client Experience',
+        r.payload && r.payload.experience_category === 'Client Experience',
+        r.payload && r.payload.experience_category);
+    });
+
+    // What the flag reaches is the envelope and the category, never the
+    // derivation: strip the category and the two payloads are identical.
+    (function () {
+      var ours = route({ stream: true });
+      var theirs = route({ stream: false });
+
+      function withoutCategory(p) {
+        var out = {};
+        Object.keys(p).forEach(function (k) {
+          if (k !== 'experience_category') out[k] = p[k];
+        });
+        return out;
+      }
+
+      check('the derived payload is identical across the two streams',
+        JSON.stringify(withoutCategory(ours.payload)) ===
+          JSON.stringify(withoutCategory(theirs.payload)),
+        JSON.stringify(ours.payload) + ' vs ' + JSON.stringify(theirs.payload));
+      check('and carries the derived segment either way',
+        ours.payload.experience_segment === 'ABC.XV2' &&
+          theirs.payload.experience_segment === 'ABC.XV2',
+        JSON.stringify([ours.payload.experience_segment, theirs.payload.experience_segment]));
+
+      // The one derived field that does differ, since a client experience
+      // arriving in the client's own reporting should read as theirs.
+      check('our stream is categorised Conversio Experience',
+        ours.payload.experience_category === 'Conversio Experience',
+        ours.payload.experience_category);
+      check("the client's is categorised Client Experience",
+        theirs.payload.experience_category === 'Client Experience',
+        theirs.payload.experience_category);
+    })();
+
+    // Sampling composes with the routing rather than competing with it.
+    (function () {
+      var r = route({ stream: false, sample: true });
+      check('a sampled client experience is marked .S like any other',
+        r.payload && r.payload.experience_segment === 'Homepage hero.XV2.S',
+        r.payload && r.payload.experience_segment);
+    })();
+
+    // From the push onwards it is that stream's own business: the matching
+    // stream processes it, the other never sees it, and their storage is
+    // separate as it is for any other experience.
+    (function () {
+      var ours = route({ stream: true });
+      check('our stream emits the session event',
+        JSON.stringify(ours.emits) === JSON.stringify(['conversio_experience_session']),
+        JSON.stringify(ours.emits));
+      check('and stores the segment in the Conversio map only',
+        !!ours.session.conversioExperienceMap && !ours.session.clientExperienceMap,
+        ours.session.conversioExperienceMap + ' / ' + ours.session.clientExperienceMap);
+
+      var theirs = route({ stream: false });
+      check('the client stream emits its own session event',
+        JSON.stringify(theirs.emits) === JSON.stringify(['client_experience_session']),
+        JSON.stringify(theirs.emits));
+      check('and stores the segment in the client map only',
+        !!theirs.session.clientExperienceMap && !theirs.session.conversioExperienceMap,
+        theirs.session.clientExperienceMap + ' / ' + theirs.session.conversioExperienceMap);
+    })();
+
+    // A client experience carries no identity, as no client send does: the
+    // helper cannot smuggle the conversio_id into the client's stream.
+    (function () {
+      var r = tag(consented({}));
+      r.window.ABTasty = {
+        getTestsOnPage: function () {
+          return tests('ABC | Homepage hero', 'Original');
+        }
+      };
+      r.window.conversio_experience = false;
+      r.window.conversioAbtastyTracking('12345');
+      r.drain();
+
+      var emit = r.dataLayer.filter(function (e) {
+        return e && e.event === 'client_experience_session';
+      })[0];
+      check('the client emit carries no conversio_id',
+        !!emit && !('conversio_id' in emit.client), JSON.stringify(emit && emit.client));
+      check('and no vitals',
+        !!emit && !('conversio_vitals' in emit.client), JSON.stringify(emit && emit.client));
+    })();
+
+    // The same test reported to both streams is two experiences, not one
+    // de-duplicated: the segment is shared but the storage is not.
+    (function () {
+      var r = tag(consented({}));
+      r.window.ABTasty = {
+        getTestsOnPage: function () {
+          return tests('ABC | Homepage hero', 'Variation 2 | blue button');
+        }
+      };
+      r.window.conversio_experience = true;
+      r.window.conversioAbtastyTracking('12345');
+      r.window.conversio_experience = false;
+      r.window.conversioAbtastyTracking('12345');
+      r.drain();
+
+      var ours = r.dataLayer.filter(function (e) {
+        return e && e.event === 'conversio_experience_session';
+      });
+      var theirs = r.dataLayer.filter(function (e) {
+        return e && e.event === 'client_experience_session';
+      });
+      check('reported to both streams, each emits once',
+        ours.length === 1 && theirs.length === 1,
+        ours.length + ' / ' + theirs.length);
+      check('and each stores the segment in its own map',
+        r.session.conversioExperienceMap.indexOf('ABC.XV2') !== -1 &&
+          r.session.clientExperienceMap.indexOf('ABC.XV2') !== -1,
+        r.session.conversioExperienceMap + ' / ' + r.session.clientExperienceMap);
+    })();
+
+    // The helper pushes the snake_case name, but it is only one caller: a
+    // container pushing either accepted name is unaffected by it existing, and
+    // by the flag it reads. Section 20 covers the name pair itself; this is the
+    // check that 2.6 left both alone.
+    (function () {
+      var r = tag(consented({}));
+      r.window.conversio_experience = false;
+      r.dataLayer.push({
+        event: 'conversioExperience',
+        conversio: {
+          experience_segment: 'legacy-camel', experience_category: 'C',
+          experience_action: 'A', experience_label: 'L'
+        }
+      });
+      r.drain();
+      check('a container pushing the camelCase name still reports to our stream',
+        r.dataLayer.filter(function (e) {
+          return e && e.event === 'conversio_experience_session';
+        }).length === 1);
+      check('and the AB Tasty stream flag does not divert it',
+        !r.session.clientExperienceMap, r.session.clientExperienceMap);
+    })();
+
+    // A drop is a drop whichever stream was asked for: the guards run before
+    // the stream is consulted, so nothing lands anywhere.
+    (function () {
+      var r = tag(consented({}));
+      r.window.ABTasty = { getTestsOnPage: function () { return tests('ABC', 'Original'); } };
+      r.window.conversio_experience = false;
+      r.window.conversio_sample = true;
+
+      check('a dropped call reports false with the client stream selected',
+        r.window.conversioAbtastyTracking('12345') === false);
+      r.drain();
+      check('and pushes nothing to either stream',
+        r.dataLayer.filter(function (e) {
+          return e && (e.event === 'client_experience' || e.event === 'conversio_experience');
+        }).length === 0);
     })();
   })();
 

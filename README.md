@@ -60,6 +60,10 @@ dataLayer.push({ event: 'client_event', client: {
 }});
 ```
 
+Either experience can also be pushed by the [AB Tasty helper](#the-ab-tasty-helper-26)
+rather than by the container, which derives the payload from the campaign instead
+of being handed it.
+
 The payload key is part of the match, so a `client_experience` carrying a
 `conversio` payload is not a trigger, and neither is the reverse. The two streams
 share no storage: a segment reported to one is invisible to the other, and each
@@ -91,15 +95,16 @@ instance per push and a second push is a second instance.
 From 2.6 the tag exposes one function for a client's own JavaScript to call:
 
 ```js
-var conversio_sample = false;
+var conversio_sample = false;      // is this a sampled run?
+var conversio_experience = true;   // our stream, or false for the client's
 window.conversioAbtastyTracking(testId);
 ```
 
 It is called from an AB Tasty test's own script, and it does what that script
 would otherwise do by hand: read the campaign off `ABTasty.getTestsOnPage()`,
-derive the segment from the campaign and variation names, and push a
-`conversio_experience`. What it saves is every test re-deriving the segment
-itself, which is where the derivation and the naming drift apart.
+derive the segment from the campaign and variation names, and push the
+experience. What it saves is every test re-deriving the segment itself, which is
+where the derivation and the naming drift apart.
 
 The convention it reads is AB Tasty's own, and it belongs to whoever set the test
 up rather than to this tag:
@@ -118,7 +123,34 @@ code from the **second** name segment, so a sampled campaign has to be named wit
 three parts: named with two, the test name becomes the code, which is the
 convention being wrong rather than the function guessing at it.
 
-The push is an ordinary `conversio_experience` from there on, so it is
+`conversio_experience` chooses the stream, read the same way at the same moment:
+
+| `conversio_experience` | Pushes | Payload key | `experience_category` |
+| --- | --- | --- | --- |
+| `true`, `'true'`, or absent | `conversio_experience` | `conversio` | `Conversio Experience` |
+| `false` or `'false'` | `client_experience` | `client` | `Client Experience` |
+
+Note the default runs the opposite way to `conversio_sample`: each reads as its
+own normal case, most tests not being sampled and most experiences being ours. So
+a test that sets nothing still reports to the Conversio stream, and only an
+explicit `false` diverts it, since an experience quietly landing in the client's
+own reporting would sit there unnoticed until someone read the numbers.
+
+Those three names are the whole of what the flag reaches, and they are written
+out in the helper rather than derived from anything. The segment is worked out
+before the flag is consulted, so the same test reports the same segment either
+way, and everything downstream is that stream's own business: its storage, its
+session event, its GA4 event name, and no `conversio_id` or vitals on a client
+send. Reporting one test to both streams is therefore two experiences rather than
+one, which is a thing to do deliberately and not by leaving the flag to chance.
+
+The helper is only one of the ways an experience gets pushed, so it changes
+nothing for the rest. The trigger names above are untouched by it: a container
+pushing `conversioExperience` or `conversio_experience` reports exactly as it
+did, and the `conversio_experience` flag has no bearing on either, being read
+only when the helper is called.
+
+The push is an ordinary experience for that stream from there on, so it is
 de-duplicated by segment, held by the same consent gate, and sent to GA4
 identically. Calling twice for one test is therefore harmless, and calling
 before consent is fine: the experience is buffered and arrives when consent does.
@@ -163,10 +195,10 @@ means the suite is verifying the exact bytes clients receive. A passing run look
 like:
 
 ```
-conversio_runtime_tag_v2.6.js: 303 passed, 0 failed
-self-hosted/public/runtime-tag.2.6.js: 303 passed, 0 failed
+conversio_runtime_tag_v2.6.js: 358 passed, 0 failed
+self-hosted/public/runtime-tag.2.6.js: 358 passed, 0 failed
 
-TOTAL: 606 passed, 0 failed
+TOTAL: 716 passed, 0 failed
 ```
 
 There's a second suite for the self-hosted loader Worker, which runs it against
@@ -189,8 +221,8 @@ and are worth keeping green while any client is pinned to those bundles.
 
 Everything in 2.5.1 below, plus `conversioAbtastyTracking`, described in full
 [above](#the-ab-tasty-helper-26). It is the first entry point in this tag that a
-client's own JavaScript calls by name, so section 25 covers the contract as much
-as the derivation.
+client's own JavaScript calls by name, so sections 25 and 26 cover the contract
+as much as the derivation.
 
 The derivation is table-driven: every variation form against the segment it
 should produce, both sampled spellings of the flag against the marked result, and
@@ -199,6 +231,23 @@ bad data reaching the experience map: an id with no campaign on the page, a
 `getTestsOnPage()` that throws, a campaign missing either name or holding a
 non-string one, and a name carrying no code where the flag says to look. Each
 returns `false` and pushes nothing.
+
+Section 26 is the stream flag. Every absent-or-not-false spelling reports to the
+Conversio stream, both `false` spellings to the client's, each under its own
+event name, payload key and category. Strip the category and the two payloads are
+identical, which is what pins the flag to those three names rather than to the
+derivation. Then that each push is processed by its own stream and marked by its
+own processed flag, stored in its own map with the other's untouched, that a
+client send still carries no `conversio_id` and no vitals, that one test reported
+to both streams is two experiences and not one de-duplicated, and that a dropped
+call with the client stream selected pushes to neither, the guards running before
+the flag is consulted.
+
+Last, that the helper existing changes nothing for a container: a
+`conversioExperience` pushed the old way still reports to the Conversio stream
+with the flag set to `false`, since the flag is read only when the helper is
+called. The stream descriptors are byte-identical to 2.5.1's, which is what makes
+that true by construction rather than by test.
 
 The contract is the rest. That the function is on the window at all, section 12's
 globals allow-list having gained it deliberately rather than by accident. That

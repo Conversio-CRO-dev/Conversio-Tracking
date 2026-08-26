@@ -1228,11 +1228,16 @@
   }
 
   // --- AB Tasty experiences ----------------------------------------------
-  // A shorthand for reporting an AB Tasty test as a Conversio experience,
-  // called from the test's own JavaScript rather than from anywhere in here.
-  // Everything it does could be done by the test pushing a conversio_experience
-  // itself; what it saves is every test re-deriving the segment code from the
-  // campaign and variation names, which is where the two drift apart.
+  // A shorthand for reporting an AB Tasty test as an experience, called from
+  // the test's own JavaScript rather than from anywhere in here. Everything it
+  // does could be done by the test pushing the experience itself; what it saves
+  // is every test re-deriving the segment code from the campaign and variation
+  // names, which is where the two drift apart.
+  //
+  // Either stream can be the destination, chosen by the conversio_experience
+  // flag on the window (see abtastyUsesClientStream). The derivation is the same
+  // for both, so the choice reaches only the event name, the payload key and the
+  // category.
   //
   // The convention it reads is AB Tasty's own campaign name, 'CODE | Test name'
   // normally and 'Prefix | CODE | Test name' on a sampled test, together with
@@ -1257,19 +1262,48 @@
     return flag === true || flag === 'true';
   }
 
+  // Whether the experience is the client's rather than ours, read off the
+  // window at call time like the sample flag and set by the calling test the
+  // same way. Ours unless the flag says otherwise: a test that sets nothing
+  // reports where every AB Tasty test reported before this flag existed, so the
+  // absent case cannot quietly divert an experience into the client's own
+  // reporting, where it would sit unnoticed until someone read the numbers.
+  //
+  // This is the opposite default to readAbtastySampleFlag, and for the same
+  // reason: each reads as its own normal case. Most tests are not sampled, and
+  // most experiences are ours.
+  function abtastyUsesClientStream() {
+    var flag;
+    try {
+      flag = window.conversio_experience;
+    } catch (e) {
+      return false;
+    }
+    return flag === false || flag === 'false';
+  }
+
   // Pushed through dl rather than a fresh window.dataLayer lookup, so the push
   // is the hooked one this tag installed and the experience is processed even
   // if something has since reassigned window.dataLayer.
-  function pushAbtastyExperience(gv, testCode, testData) {
-    dl.push({
-      event: 'conversio_experience',
-      conversio: {
-        experience_category: 'Conversio Experience',
-        experience_action: testCode + ' | ' + gv.testID + ' | ' + testData.name,
-        experience_label: gv.testID + ' | ' + testData.variationName,
-        experience_segment: gv.testSegment
-      }
-    });
+  //
+  // The three names that differ between the streams are written out here rather
+  // than read off the stream descriptors. This function pushes one shape of
+  // event and the descriptors describe every shape either stream accepts, the
+  // Conversio one accepting a second experience name that a container may still
+  // be pushing: sending this through them would put the choice of which of those
+  // to push somewhere that has to stay correct for every other caller too.
+  // Everything past the push is descriptor-driven as before.
+  function pushAbtastyExperience(useClient, gv, testCode, testData) {
+    var item = { event: useClient ? 'client_experience' : 'conversio_experience' };
+
+    item[useClient ? 'client' : 'conversio'] = {
+      experience_category: useClient ? 'Client Experience' : 'Conversio Experience',
+      experience_action: testCode + ' | ' + gv.testID + ' | ' + testData.name,
+      experience_label: gv.testID + ' | ' + testData.variationName,
+      experience_segment: gv.testSegment
+    };
+
+    dl.push(item);
   }
 
   // Returns whether an experience was reported, so a caller that wants to know
@@ -1279,6 +1313,7 @@
   // de-duplicated by segment downstream (see persistExperienceIfNew).
   function conversioAbtastyTracking(testId) {
     var sampled = readAbtastySampleFlag();
+    var useClient = abtastyUsesClientStream();
     var tests;
     var testData;
     var nameParts;
@@ -1327,6 +1362,7 @@
     if (sampled) expSeg = expSeg + '.S';
 
     pushAbtastyExperience(
+      useClient,
       { testID: testId, testSegment: expSeg },
       testCode,
       testData

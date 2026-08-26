@@ -933,20 +933,32 @@
     return flag === true || flag === 'true';
   }
 
-  function pushAbtastyExperience(gv, testCode, testData) {
-    dl.push({
-      event: 'conversio_experience',
-      conversio: {
-        experience_category: 'Conversio Experience',
-        experience_action: testCode + ' | ' + gv.testID + ' | ' + testData.name,
-        experience_label: gv.testID + ' | ' + testData.variationName,
-        experience_segment: gv.testSegment
-      }
-    });
+  function abtastyUsesClientStream() {
+    var flag;
+    try {
+      flag = window.conversio_experience;
+    } catch (e) {
+      return false;
+    }
+    return flag === false || flag === 'false';
+  }
+
+  function pushAbtastyExperience(useClient, gv, testCode, testData) {
+    var item = { event: useClient ? 'client_experience' : 'conversio_experience' };
+
+    item[useClient ? 'client' : 'conversio'] = {
+      experience_category: useClient ? 'Client Experience' : 'Conversio Experience',
+      experience_action: testCode + ' | ' + gv.testID + ' | ' + testData.name,
+      experience_label: gv.testID + ' | ' + testData.variationName,
+      experience_segment: gv.testSegment
+    };
+
+    dl.push(item);
   }
 
   function conversioAbtastyTracking(testId) {
     var sampled = readAbtastySampleFlag();
+    var useClient = abtastyUsesClientStream();
     var tests;
     var testData;
     var nameParts;
@@ -985,6 +997,7 @@
     if (sampled) expSeg = expSeg + '.S';
 
     pushAbtastyExperience(
+      useClient,
       { testID: testId, testSegment: expSeg },
       testCode,
       testData
