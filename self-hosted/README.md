@@ -222,6 +222,13 @@ their category/action/label:
 | `conversio_id` | the visitor's `conversio_id` | same |
 | `conversio_vitals` | Core Web Vitals, when collected | not sent, from 2.4.1 on |
 
+The payload fields in the right-hand columns each answer to a camelCase name
+as well, from 2.6.1 on, so a legacy campaign pushing `experienceAction` fills
+`conversio_action` exactly as a current one pushing `experience_action` does.
+The normalisation happens where the pushed item is read, so nothing about what
+goes out to GA4 depends on which spelling arrived. See the
+[trigger events section](../README.md#trigger-events) for the full list.
+
 The three that carry more than one value are **delimited strings, not JSON**,
 from 2.4.1 on:
 
