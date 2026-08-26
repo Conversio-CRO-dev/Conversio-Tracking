@@ -19,7 +19,7 @@ plus the tooling around it.
   Edit the GTM file, never the bundle, and rebuild:
 
   ```bash
-  cd self-hosted && node scripts/build-bundle.mjs 2.5.1
+  cd self-hosted && node scripts/build-bundle.mjs 2.6
   ```
 
   `--check` instead exits non-zero if the committed bundle is stale, so it can
@@ -60,6 +60,10 @@ dataLayer.push({ event: 'client_event', client: {
 }});
 ```
 
+Either experience can also be pushed by the [AB Tasty helper](#the-ab-tasty-helper-26)
+rather than by the container, which derives the payload from the campaign instead
+of being handed it.
+
 The payload key is part of the match, so a `client_experience` carrying a
 `conversio` payload is not a trigger, and neither is the reverse. The two streams
 share no storage: a segment reported to one is invisible to the other, and each
@@ -86,6 +90,88 @@ instance per push and a second push is a second instance.
 
 ---
 
+## The AB Tasty helper (2.6)
+
+From 2.6 the tag exposes one function for a client's own JavaScript to call:
+
+```js
+var conversio_sample = false;      // is this a sampled run?
+var conversio_experience = true;   // our stream, or false for the client's
+window.conversioAbtastyTracking(testId);
+```
+
+It is called from an AB Tasty test's own script, and it does what that script
+would otherwise do by hand: read the campaign off `ABTasty.getTestsOnPage()`,
+derive the segment from the campaign and variation names, and push the
+experience. What it saves is every test re-deriving the segment itself, which is
+where the derivation and the naming drift apart.
+
+The convention it reads is AB Tasty's own, and it belongs to whoever set the test
+up rather than to this tag:
+
+| Campaign name | `conversio_sample` | Variation name | Segment |
+| --- | --- | --- | --- |
+| `ABC \| Homepage hero` | `false` | `Variation 2 \| blue button` | `ABC.XV2` |
+| `ABC \| Homepage hero` | `false` | `Original` | `ABC.XCO` |
+| `ABC \| Homepage hero` | `false` | `Control` | `ABC.XCO` |
+| `Sample \| ABC \| Homepage hero` | `true` | `Variation 2 \| blue button` | `ABC.XV2.S` |
+
+`conversio_sample` is read off the window at call time, not passed in, since
+that is where the calling test sets it; the string `'true'` counts as well as
+the boolean, and anything else reads as unsampled. The sampled form takes the
+code from the **second** name segment, so a sampled campaign has to be named with
+three parts: named with two, the test name becomes the code, which is the
+convention being wrong rather than the function guessing at it.
+
+`conversio_experience` chooses the stream, read the same way at the same moment:
+
+| `conversio_experience` | Pushes | Payload key | `experience_category` |
+| --- | --- | --- | --- |
+| `true`, `'true'`, or absent | `conversio_experience` | `conversio` | `Conversio Experience` |
+| `false` or `'false'` | `client_experience` | `client` | `Client Experience` |
+
+Note the default runs the opposite way to `conversio_sample`: each reads as its
+own normal case, most tests not being sampled and most experiences being ours. So
+a test that sets nothing still reports to the Conversio stream, and only an
+explicit `false` diverts it, since an experience quietly landing in the client's
+own reporting would sit there unnoticed until someone read the numbers.
+
+Those three names are the whole of what the flag reaches, and they are written
+out in the helper rather than derived from anything. The segment is worked out
+before the flag is consulted, so the same test reports the same segment either
+way, and everything downstream is that stream's own business: its storage, its
+session event, its GA4 event name, and no `conversio_id` or vitals on a client
+send. Reporting one test to both streams is therefore two experiences rather than
+one, which is a thing to do deliberately and not by leaving the flag to chance.
+
+The helper is only one of the ways an experience gets pushed, so it changes
+nothing for the rest. The trigger names above are untouched by it: a container
+pushing `conversioExperience` or `conversio_experience` reports exactly as it
+did, and the `conversio_experience` flag has no bearing on either, being read
+only when the helper is called.
+
+The push is an ordinary experience for that stream from there on, so it is
+de-duplicated by segment, held by the same consent gate, and sent to GA4
+identically. Calling twice for one test is therefore harmless, and calling
+before consent is fine: the experience is buffered and arrives when consent does.
+
+The return value says whether an experience was reported. It comes back `false`,
+rather than throwing into whatever ran the next line, when the campaign is not on
+the page, when `getTestsOnPage()` fails, or when the campaign name carries no
+code where the sample flag says to look, since an experience keyed on
+`undefined` cannot be untangled downstream. Nothing is logged either way: this
+tag writes nothing to a client's console.
+
+Two things follow from it being on the window. It is callable by anything on the
+page, so it validates what it is given and swallows its own failures; and once a
+client's tests call it, the name and its one argument are a contract, unlike the
+internals around them. `window.__conversioEnableEmission__` and its two
+siblings keep the `__conversio*__` spelling that marks a control a consent
+platform calls; this one is typed out by hand in a test, so it has the plain
+name.
+
+---
+
 ## Testing
 
 `test/` contains a Node-based test suite that loads the actual tag source
@@ -98,21 +184,21 @@ installs are required, only Node itself.
 Run the suite for the current version with:
 
 ```bash
-node test/runtime-tag-2.5.1.test.js
+node test/runtime-tag-2.6.test.js
 ```
 
-This runs the same set of checks against both shipped copies of the 2.5.1 tag,
-the GTM dev file (`conversio_runtime_tag_v2.5.1.js`) and the self-hosted bundle
-(`self-hosted/public/runtime-tag.2.5.1.js`), so the two can't silently diverge.
+This runs the same set of checks against both shipped copies of the 2.6 tag,
+the GTM dev file (`conversio_runtime_tag_v2.6.js`) and the self-hosted bundle
+(`self-hosted/public/runtime-tag.2.6.js`), so the two can't silently diverge.
 Since 2.4.1 the bundle is the comment-stripped build rather than a copy, which
 means the suite is verifying the exact bytes clients receive. A passing run looks
 like:
 
 ```
-conversio_runtime_tag_v2.5.1.js: 261 passed, 0 failed
-self-hosted/public/runtime-tag.2.5.1.js: 261 passed, 0 failed
+conversio_runtime_tag_v2.6.js: 358 passed, 0 failed
+self-hosted/public/runtime-tag.2.6.js: 358 passed, 0 failed
 
-TOTAL: 522 passed, 0 failed
+TOTAL: 716 passed, 0 failed
 ```
 
 There's a second suite for the self-hosted loader Worker, which runs it against
@@ -125,10 +211,56 @@ node test/loader.test.js
 ```
 
 Both exit non-zero if anything fails, so they're safe to wire into CI. Earlier
-versions keep their own suites (`test/runtime-tag-2.5.test.js`,
+versions keep their own suites (`test/runtime-tag-2.5.1.test.js`,
+`test/runtime-tag-2.5.test.js`,
 `test/runtime-tag-2.4.2.test.js`, `test/runtime-tag-2.4.1.test.js`,
 `test/runtime-tag-2.4.test.js`, `test/runtime-tag-2.3.test.js`), which still pass
 and are worth keeping green while any client is pinned to those bundles.
+
+### What it covers (2.6)
+
+Everything in 2.5.1 below, plus `conversioAbtastyTracking`, described in full
+[above](#the-ab-tasty-helper-26). It is the first entry point in this tag that a
+client's own JavaScript calls by name, so sections 25 and 26 cover the contract
+as much as the derivation.
+
+The derivation is table-driven: every variation form against the segment it
+should produce, both sampled spellings of the flag against the marked result, and
+seven values that must read as unsampled. Then the drops, which are what stops
+bad data reaching the experience map: an id with no campaign on the page, a
+`getTestsOnPage()` that throws, a campaign missing either name or holding a
+non-string one, and a name carrying no code where the flag says to look. Each
+returns `false` and pushes nothing.
+
+Section 26 is the stream flag. Every absent-or-not-false spelling reports to the
+Conversio stream, both `false` spellings to the client's, each under its own
+event name, payload key and category. Strip the category and the two payloads are
+identical, which is what pins the flag to those three names rather than to the
+derivation. Then that each push is processed by its own stream and marked by its
+own processed flag, stored in its own map with the other's untouched, that a
+client send still carries no `conversio_id` and no vitals, that one test reported
+to both streams is two experiences and not one de-duplicated, and that a dropped
+call with the client stream selected pushes to neither, the guards running before
+the flag is consulted.
+
+Last, that the helper existing changes nothing for a container: a
+`conversioExperience` pushed the old way still reports to the Conversio stream
+with the flag set to `false`, since the flag is read only when the helper is
+called. The stream descriptors are byte-identical to 2.5.1's, which is what makes
+that true by construction rather than by test.
+
+The contract is the rest. That the function is on the window at all, section 12's
+globals allow-list having gained it deliberately rather than by accident. That
+`ABTasty` and `conversio_sample` are read at call time, so a page with no
+`ABTasty` on it still loads the tag and still fires `conversio_data`, and a
+call there returns `false` rather than throwing. That what it pushes is an
+ordinary `conversio_experience`: processed by the push hook into a session
+emit, stored in the Conversio map and not the client one, de-duplicated to one
+emit across two calls, and held by the consent gate until consent arrives.
+
+The harness needed nothing for this. Both globals are read at call time, so a
+test sets them on the `window` the harness already returns and calls the
+function through it, the same way an AB Tasty test would.
 
 ### What it covers (2.5.1)
 
@@ -363,7 +495,7 @@ the JS served on every page of that client's site.
 ### Adding a new version
 
 When a new tag version needs its own suite, copy the pattern in
-`test/runtime-tag-2.5.1.test.js`: point `TAG_PATHS` at the new file(s) and reuse
+`test/runtime-tag-2.6.test.js`: point `TAG_PATHS` at the new file(s) and reuse
 `test/harness.js` as-is, since the harness itself is version-agnostic. Bump
 `BUNDLE_VERSION` in `test/loader.test.js` too, so the loader suite exercises
 the current bundle.
