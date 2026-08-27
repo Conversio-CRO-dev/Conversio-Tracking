@@ -19,7 +19,7 @@ plus the tooling around it.
   Edit the GTM file, never the bundle, and rebuild:
 
   ```bash
-  cd self-hosted && node scripts/build-bundle.mjs 2.6.1
+  cd self-hosted && node scripts/build-bundle.mjs 2.6.2
   ```
 
   `--check` instead exits non-zero if the committed bundle is stale, so it can
@@ -132,21 +132,79 @@ instance per push and a second push is a second instance.
 
 ---
 
-## The AB Tasty helper (2.6)
+## The AB Tasty helper (2.6, queued from 2.6.2)
 
-From 2.6 the tag exposes one function for a client's own JavaScript to call:
+An AB Tasty test reports itself as a Conversio experience by handing the tag a
+campaign id. From 2.6.2 the way to do that is a queue:
 
 ```js
-var conversio_sample = false;      // is this a sampled run?
-var conversio_experience = true;   // our stream, or false for the client's
-window.conversioAbtastyTracking(testId);
+(window.conversioAbtastyQueue = window.conversioAbtastyQueue || []).push({
+  testId: '1577840',   // the AB Tasty campaign id
+  sample: false,       // is this a sampled run?
+  experience: true     // our stream, or false for the client's
+});
 ```
 
-It is called from an AB Tasty test's own script, and it does what that script
+A bare id is the shorthand for both defaults, which is most tests:
+
+```js
+(window.conversioAbtastyQueue = window.conversioAbtastyQueue || []).push('1577840');
+```
+
+It is written into an AB Tasty test's own script, and it does what that script
 would otherwise do by hand: read the campaign off `ABTasty.getTestsOnPage()`,
 derive the segment from the campaign and variation names, and push the
 experience. What it saves is every test re-deriving the segment itself, which is
 where the derivation and the naming drift apart.
+
+### Why a queue (2.6.2)
+
+Up to 2.6.1 the only entry point was a function on the window, and a test snippet
+cannot call a function that does not exist yet. AB Tasty is built to run as early
+as it can, usually synchronously in the head so a variation is painted rather than
+flickering into place, while this tag arrives through a container that is
+typically async. So the test winning that race is the ordinary case, not the
+exception, and the only safe way to call a function that may be absent is to
+guard it:
+
+```js
+// 2.6.1 and earlier: reports nothing at all when the test wins the race
+if (typeof window.conversioAbtastyTracking === 'function') {
+  window.conversioAbtastyTracking(testId);
+}
+```
+
+That guard stops a crash and turns the race into silent data loss instead: no
+error, no console output, one missing experience. The queue inverts it. The test
+pushes to an array it creates if nobody has yet, the tag drains that array when
+it initialises and then replaces it with something whose `push` reports
+immediately. Pushed before the tag, an item waits; pushed after, it goes straight
+through. It is the pattern `dataLayer` itself uses, and for the same reason.
+
+A queued item's flags travel with the item rather than being read off the window
+when it runs, and that is a correctness requirement rather than a preference. An
+item may sit until init, so two tests queueing before the tag arrives are drained
+in one pass: read off the window, both would get whichever value the window
+happened to hold at drain time, and whatever the second test set would be
+reported for the first.
+
+### The direct call (2.6)
+
+`window.conversioAbtastyTracking(testId)` is unchanged and still supported, so a
+test already calling it keeps working. It executes immediately, so it reads both
+flags off the window at call time, where the calling test sets them:
+
+```js
+window.conversio_sample = false;      // is this a sampled run?
+window.conversio_experience = true;   // our stream, or false for the client's
+window.conversioAbtastyTracking('1577840');
+```
+
+Note `window.` rather than a bare `var`. The tag reads `window.conversio_sample`
+and `window.conversio_experience`, and if AB Tasty wraps the test code in a
+function, which it commonly does, a `var` of that name is function-local and
+never reaches the window. The flag is then silently ignored and the default
+applies. The queue has no such trap, its flags being properties of the item.
 
 The convention it reads is AB Tasty's own, and it belongs to whoever set the test
 up rather than to this tag:
@@ -158,21 +216,21 @@ up rather than to this tag:
 | `ABC \| Homepage hero` | `false` | `Control` | `ABC.XCO` |
 | `Sample \| ABC \| Homepage hero` | `true` | `Variation 2 \| blue button` | `ABC.XV2.S` |
 
-`conversio_sample` is read off the window at call time, not passed in, since
-that is where the calling test sets it; the string `'true'` counts as well as
-the boolean, and anything else reads as unsampled. The sampled form takes the
-code from the **second** name segment, so a sampled campaign has to be named with
-three parts: named with two, the test name becomes the code, which is the
-convention being wrong rather than the function guessing at it.
+The sample flag takes the string `'true'` as well as the boolean, since a value
+arriving from a GTM variable is as likely to be one as the other, and anything
+else reads as unsampled. The sampled form takes the code from the **second** name
+segment, so a sampled campaign has to be named with three parts: named with two,
+the test name becomes the code, which is the convention being wrong rather than
+the tag guessing at it.
 
-`conversio_experience` chooses the stream, read the same way at the same moment:
+The experience flag chooses the stream:
 
-| `conversio_experience` | Pushes | Payload key | `experience_category` |
+| `experience` | Pushes | Payload key | `experience_category` |
 | --- | --- | --- | --- |
 | `true`, `'true'`, or absent | `conversio_experience` | `conversio` | `Conversio Experience` |
 | `false` or `'false'` | `client_experience` | `client` | `Client Experience` |
 
-Note the default runs the opposite way to `conversio_sample`: each reads as its
+Note the default runs the opposite way to `sample`: each reads as its
 own normal case, most tests not being sampled and most experiences being ours. So
 a test that sets nothing still reports to the Conversio stream, and only an
 explicit `false` diverts it, since an experience quietly landing in the client's
@@ -204,13 +262,21 @@ code where the sample flag says to look, since an experience keyed on
 `undefined` cannot be untangled downstream. Nothing is logged either way: this
 tag writes nothing to a client's console.
 
-Two things follow from it being on the window. It is callable by anything on the
-page, so it validates what it is given and swallows its own failures; and once a
-client's tests call it, the name and its one argument are a contract, unlike the
-internals around them. `window.__conversioEnableEmission__` and its two
+The queue answers the same way, an unusable item being stepped over rather than
+ending the drain: one test snippet pushing something malformed must not cost every
+other test on the page its experience. The whole drain is guarded too, so whatever
+a page has left in that array, the tag still initialises. The return value of a
+queued push is deliberately not part of the contract, since before the tag loads
+it is the array's new length and after it the boolean, and the two cannot be made
+to agree without lying about one of them.
+
+Two things follow from these being on the window. They are reachable by anything
+on the page, so they validate what they are given and swallow their own failures;
+and once a client's tests use them, the two names and their shapes are a contract,
+unlike the internals around them. `window.__conversioEnableEmission__` and its two
 siblings keep the `__conversio*__` spelling that marks a control a consent
-platform calls; this one is typed out by hand in a test, so it has the plain
-name.
+platform calls; these are typed out by hand in a test, so they have the plain
+names.
 
 ---
 
@@ -226,21 +292,21 @@ installs are required, only Node itself.
 Run the suite for the current version with:
 
 ```bash
-node test/runtime-tag-2.6.1.test.js
+node test/runtime-tag-2.6.2.test.js
 ```
 
-This runs the same set of checks against both shipped copies of the 2.6.1 tag,
-the GTM dev file (`conversio_runtime_tag_v2.6.1.js`) and the self-hosted bundle
-(`self-hosted/public/runtime-tag.2.6.1.js`), so the two can't silently diverge.
+This runs the same set of checks against both shipped copies of the 2.6.2 tag,
+the GTM dev file (`conversio_runtime_tag_v2.6.2.js`) and the self-hosted bundle
+(`self-hosted/public/runtime-tag.2.6.2.js`), so the two can't silently diverge.
 Since 2.4.1 the bundle is the comment-stripped build rather than a copy, which
 means the suite is verifying the exact bytes clients receive. A passing run looks
 like:
 
 ```
-conversio_runtime_tag_v2.6.1.js: 404 passed, 0 failed
-self-hosted/public/runtime-tag.2.6.1.js: 404 passed, 0 failed
+conversio_runtime_tag_v2.6.2.js: 439 passed, 0 failed
+self-hosted/public/runtime-tag.2.6.2.js: 439 passed, 0 failed
 
-TOTAL: 808 passed, 0 failed
+TOTAL: 878 passed, 0 failed
 ```
 
 There's a second suite for the self-hosted loader Worker, which runs it against
@@ -253,11 +319,58 @@ node test/loader.test.js
 ```
 
 Both exit non-zero if anything fails, so they're safe to wire into CI. Earlier
-versions keep their own suites (`test/runtime-tag-2.6.test.js`,
+versions keep their own suites (`test/runtime-tag-2.6.1.test.js`,
+`test/runtime-tag-2.6.test.js`,
 `test/runtime-tag-2.5.1.test.js`, `test/runtime-tag-2.5.test.js`,
 `test/runtime-tag-2.4.2.test.js`, `test/runtime-tag-2.4.1.test.js`,
 `test/runtime-tag-2.4.test.js`, `test/runtime-tag-2.3.test.js`), which still pass
 and are worth keeping green while any client is pinned to those bundles.
+
+### What it covers (2.6.2)
+
+Everything in 2.6.1 below, plus the AB Tasty queue, described in full
+[above](#why-a-queue-262). All 404 of the inherited checks pass unchanged except
+one, deliberately: section 12's globals allow-list gained `conversioAbtastyQueue`,
+the tag now installing a live pusher at init. That the allow-list caught it is
+the point of having one.
+
+Section 28 adds 35. Both orders first, since surviving either is the whole reason
+the queue exists: an item queued before the tag loads is reported, an item pushed
+after it has loaded is reported, and one snippet reports identically whichever
+side of the tag it runs. Then the item shapes, a bare string id and a numeric one
+being shorthand for both defaults, and a numeric `testId` on an object accepted
+the same way.
+
+Then the flags, in both spellings and by default, against the stream and the
+sampled marker each should produce. Then the check the design exists for: two
+items queued with different streams and drained together each keep their own,
+and a window flag set to the opposite does not divert a queued item. Read off the
+window at drain time both would have reported whatever the second test set, so
+this is what pins the flags to the item rather than to the moment the drain ran.
+
+Then that queued items report in the order they were pushed, that one test queued
+twice de-duplicates to one experience, and that the consent gate holds a queued
+item and releases it on consent exactly as it does a directly reported one.
+
+Then what a bad queue must not do. Null, undefined, an empty object, an empty
+`testId` and a numeric one are each stepped over without costing the good item
+behind them, and an id matching no campaign reports nothing. The queue set to a
+string, a number, an object with a non-function `push`, and a getter that throws
+each still leave the tag initialised and still firing `conversio_data`, since the
+queue is a structure client code built and init has to survive whatever is in it.
+
+Last, that the direct entry point is untouched: `conversioAbtastyTracking` still
+reports, still returns `true`, still reads its stream flag off the window, and
+still returns `false` for an id with no campaign.
+
+23 of the 35 fail against 2.6.1. The other 12 pin behaviour the direct call
+already had, or pass trivially there because 2.6.1 ignores the queue entirely.
+The suite reports a missing queue as failed checks rather than a stack trace, so
+running it against a build without one lists what is absent.
+
+The harness needed nothing. `tagSource` already allowed a script to be prepended
+to the tag, which is how the losing race is reproduced: the snippet runs, then
+the tag loads underneath it.
 
 ### What it covers (2.6.1)
 
@@ -588,7 +701,7 @@ the JS served on every page of that client's site.
 ### Adding a new version
 
 When a new tag version needs its own suite, copy the pattern in
-`test/runtime-tag-2.6.1.test.js`: point `TAG_PATHS` at the new file(s) and reuse
+`test/runtime-tag-2.6.2.test.js`: point `TAG_PATHS` at the new file(s) and reuse
 `test/harness.js` as-is, since the harness itself is version-agnostic. Bump
 `BUNDLE_VERSION` in `test/loader.test.js` too, so the loader suite exercises
 the current bundle.
