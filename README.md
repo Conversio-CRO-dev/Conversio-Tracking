@@ -63,7 +63,7 @@ dataLayer.push({ event: 'client_event', client: {
 }});
 ```
 
-Either experience can also be pushed by the [AB Tasty helper](#the-ab-tasty-helper-26)
+Either experience can also be pushed by the [AB Tasty helper](#the-ab-tasty-helper-26-queued-from-262)
 rather than by the container, which derives the payload from the campaign instead
 of being handed it.
 
@@ -135,17 +135,38 @@ instance per push and a second push is a second instance.
 ## The AB Tasty helper (2.6, queued from 2.6.2)
 
 An AB Tasty test reports itself as a Conversio experience by handing the tag a
-campaign id. From 2.6.2 the way to do that is a queue:
+campaign id. From 2.6.2 the way to do that is a queue. This is the form to paste
+into an AB Tasty test, with the three values to fill in named and on their own
+lines at the top:
 
 ```js
+var test_number         = '1577840';  // AB Tasty campaign ID
+var is_sampled_test     = false;      // true only for a sampled run
+var report_to_conversio = true;       // true = Conversio reporting, false = client's own
+
 (window.conversioAbtastyQueue = window.conversioAbtastyQueue || []).push({
-  testId: '1577840',   // the AB Tasty campaign id
-  sample: false,       // is this a sampled run?
-  experience: true     // our stream, or false for the client's
+  testId:     test_number,
+  sample:     is_sampled_test,
+  experience: report_to_conversio
 });
 ```
 
-A bare id is the shorthand for both defaults, which is most tests:
+Those three variable names are the test's own and the tag never sees them: only
+the object keys `testId`, `sample` and `experience` are the contract, so name the
+inputs whatever reads clearest to whoever fills them in. Two names are worth
+avoiding, though, and they are the obvious ones: `conversio_sample` and
+`conversio_experience` are what the [direct call](#the-direct-call-26) reads off
+the window, and a global `var` of either name sets that window flag as a side
+effect. Harmless for the queued push, which takes its flags from the item, but it
+would divert any other test on the page still calling the function.
+
+Wrapping the whole thing in an IIFE keeps all three names off the window and is
+worth doing on a page that runs several tests, though since each push runs
+synchronously straight after its own assignment the flat form above is fine in
+practice.
+
+Only `testId` is required. Both flags may be left out, and a bare id is the
+shorthand for that, which covers most tests:
 
 ```js
 (window.conversioAbtastyQueue = window.conversioAbtastyQueue || []).push('1577840');
@@ -209,7 +230,7 @@ applies. The queue has no such trap, its flags being properties of the item.
 The convention it reads is AB Tasty's own, and it belongs to whoever set the test
 up rather than to this tag:
 
-| Campaign name | `conversio_sample` | Variation name | Segment |
+| Campaign name | Sampled | Variation name | Segment |
 | --- | --- | --- | --- |
 | `ABC \| Homepage hero` | `false` | `Variation 2 \| blue button` | `ABC.XV2` |
 | `ABC \| Homepage hero` | `false` | `Original` | `ABC.XCO` |
@@ -230,7 +251,7 @@ The experience flag chooses the stream:
 | `true`, `'true'`, or absent | `conversio_experience` | `conversio` | `Conversio Experience` |
 | `false` or `'false'` | `client_experience` | `client` | `Client Experience` |
 
-Note the default runs the opposite way to `sample`: each reads as its
+Note the default runs the opposite way to the sample flag: each reads as its
 own normal case, most tests not being sampled and most experiences being ours. So
 a test that sets nothing still reports to the Conversio stream, and only an
 explicit `false` diverts it, since an experience quietly landing in the client's
@@ -247,8 +268,8 @@ one, which is a thing to do deliberately and not by leaving the flag to chance.
 The helper is only one of the ways an experience gets pushed, so it changes
 nothing for the rest. The trigger names above are untouched by it: a container
 pushing `conversioExperience` or `conversio_experience` reports exactly as it
-did, and the `conversio_experience` flag has no bearing on either, being read
-only when the helper is called.
+did, and the stream flag has no bearing on either, being read only when a test
+queues an item or calls the function.
 
 The push is an ordinary experience for that stream from there on, so it is
 de-duplicated by segment, held by the same consent gate, and sent to GA4
@@ -426,7 +447,7 @@ The harness needed nothing for this.
 ### What it covers (2.6)
 
 Everything in 2.5.1 below, plus `conversioAbtastyTracking`, described in full
-[above](#the-ab-tasty-helper-26). It is the first entry point in this tag that a
+[above](#the-ab-tasty-helper-26-queued-from-262). It is the first entry point in this tag that a
 client's own JavaScript calls by name, so sections 25 and 26 cover the contract
 as much as the derivation.
 
