@@ -19,7 +19,7 @@ plus the tooling around it.
   Edit the GTM file, never the bundle, and rebuild:
 
   ```bash
-  cd self-hosted && node scripts/build-bundle.mjs 2.6
+  cd self-hosted && node scripts/build-bundle.mjs 2.6.1
   ```
 
   `--check` instead exits non-zero if the committed bundle is stale, so it can
@@ -31,7 +31,10 @@ plus the tooling around it.
 
 The tag is driven by dataLayer events the client's container pushes: an
 experience (`experience_segment`, `experience_category`, `experience_action`,
-`experience_label`) and an event (`event_segment` and the same three).
+`experience_label`) and an event (`event_segment` and the same three). From
+2.6.1 each of those fields also answers to a camelCase name, so a legacy
+campaign pushing `experienceAction` reports what a current one pushing
+`experience_action` does (below).
 
 From 2.5 there are **two independent streams of them**. The Conversio stream is
 ours, reporting what our experiences do. The client stream is the client's own,
@@ -83,6 +86,45 @@ naming is heading; the camelCase pair is what every client pushes today and stay
 supported. Nothing downstream of the match knows which name arrived, so a
 container can move over whenever it does, and one part-way through the move can
 push each. The client stream is new and accepts the snake_case name only.
+
+The four payload fields have a legacy spelling of their own, accepted from
+2.6.1. Each answers to the snake_case name above and to a camelCase one, nested
+under the same payload key:
+
+| Canonical | Also accepted |
+| --- | --- |
+| `experience_segment` | `experienceSegment` |
+| `experience_category` | `experienceCategory` |
+| `experience_action` | `experienceAction` |
+| `experience_label` | `experienceLabel` |
+| `event_segment` | `eventSegment` |
+| `event_category` | `eventCategory` |
+| `event_action` | `eventAction` |
+| `event_label` | `eventLabel` |
+
+```js
+// a legacy campaign, reporting exactly what the snake_case push above reports
+dataLayer.push({ event: 'conversioExperience', conversio: {
+  experienceSegment: 'homepage-hero-v2', experienceCategory: 'Homepage',
+  experienceAction: 'Hero test', experienceLabel: 'Variant B'
+}});
+```
+
+This is what lets a campaign written years ago keep reporting through a tag
+upgraded underneath it. A campaign live on a client's site is not something
+anyone can go back and re-key: it is running, it is collecting, and rewriting its
+snippet to take a tag version would risk the results it exists to produce.
+
+The canonical name wins wherever it carries a value, and the legacy name is read
+only where it does not, so a container part-way through a move can push each and
+a payload carrying both spellings of one field has a defined answer. Only these
+eight names are read; a camelCase key outside the list reaches nothing.
+
+Normalisation happens once, where the pushed item is first read, so the outbound
+shape is untouched: a legacy campaign's push is emitted under the snake_case
+names, and a client's downstream tags keep reading the one spelling they read
+today rather than gaining a second one to handle. Both streams normalise, though
+only the Conversio one has legacy campaigns behind it.
 
 What a container must not do is push two accepted names for the same occurrence.
 Experiences would survive it, being de-duplicated by segment, but an event is one
@@ -184,21 +226,21 @@ installs are required, only Node itself.
 Run the suite for the current version with:
 
 ```bash
-node test/runtime-tag-2.6.test.js
+node test/runtime-tag-2.6.1.test.js
 ```
 
-This runs the same set of checks against both shipped copies of the 2.6 tag,
-the GTM dev file (`conversio_runtime_tag_v2.6.js`) and the self-hosted bundle
-(`self-hosted/public/runtime-tag.2.6.js`), so the two can't silently diverge.
+This runs the same set of checks against both shipped copies of the 2.6.1 tag,
+the GTM dev file (`conversio_runtime_tag_v2.6.1.js`) and the self-hosted bundle
+(`self-hosted/public/runtime-tag.2.6.1.js`), so the two can't silently diverge.
 Since 2.4.1 the bundle is the comment-stripped build rather than a copy, which
 means the suite is verifying the exact bytes clients receive. A passing run looks
 like:
 
 ```
-conversio_runtime_tag_v2.6.js: 358 passed, 0 failed
-self-hosted/public/runtime-tag.2.6.js: 358 passed, 0 failed
+conversio_runtime_tag_v2.6.1.js: 404 passed, 0 failed
+self-hosted/public/runtime-tag.2.6.1.js: 404 passed, 0 failed
 
-TOTAL: 716 passed, 0 failed
+TOTAL: 808 passed, 0 failed
 ```
 
 There's a second suite for the self-hosted loader Worker, which runs it against
@@ -211,11 +253,62 @@ node test/loader.test.js
 ```
 
 Both exit non-zero if anything fails, so they're safe to wire into CI. Earlier
-versions keep their own suites (`test/runtime-tag-2.5.1.test.js`,
-`test/runtime-tag-2.5.test.js`,
+versions keep their own suites (`test/runtime-tag-2.6.test.js`,
+`test/runtime-tag-2.5.1.test.js`, `test/runtime-tag-2.5.test.js`,
 `test/runtime-tag-2.4.2.test.js`, `test/runtime-tag-2.4.1.test.js`,
 `test/runtime-tag-2.4.test.js`, `test/runtime-tag-2.3.test.js`), which still pass
 and are worth keeping green while any client is pinned to those bundles.
+
+### What it covers (2.6.1)
+
+Everything in 2.6 below, plus the legacy camelCase payload fields, described in
+full [above](#trigger-events). Sections 1 to 26 are the other half of that
+check: they describe the snake_case names throughout and must be untouched by
+it, which is what makes the normalisation a no-op for every container already
+pushing the current spelling. All 358 of them pass unchanged.
+
+Section 27 adds 46. The mapping is table-driven, one field at a time: the
+payload is canonical except for the single field under test, which is pushed
+under its legacy name alone carrying a value nothing else on the payload
+carries, so a value arriving under the canonical name downstream can only have
+come from the legacy key it was written to. Then the same thing whole, asserted
+against the snake_case push it stands in for rather than against a literal: a
+wholly camelCase experience emits what the snake_case one emits, sends GA4 the
+same parameters, and stores the same map and list, with the per-run
+`conversio_id` and vitals stripped before the comparison since neither is
+derived from the payload.
+
+Then precedence, which a payload carrying both spellings of one field needs a
+defined answer for: the canonical name wins where it carries a value, and the
+legacy name is read where the canonical one is empty and where it is absent
+entirely. Then that de-duplication sees through the spelling, the segment being
+normalised before the map is consulted, so one occurrence pushed under each name
+costs one emit and one list entry.
+
+Then that storage holds the canonical names, asserted on the stored string
+rather than only on the emit: a tag that normalised on the way out instead would
+pass every check above and fail these. A legacy event held by the consent gate
+is buffered under `event_segment` with no camelCase name anywhere in the buffer,
+and emits with the mapped names once consent arrives; same for an experience
+held in the map and flushed from it.
+
+Then the drops, which matter because the segment decides whether an experience
+is reported at all: learning a second name for it must not turn a payload that
+was dropped into one reported under a segment nobody can read. No segment under
+either spelling, an empty legacy segment, a legacy segment that is not a string,
+and both spellings present but empty are each pinned to emit nothing.
+
+Last, that the list is exactly eight names and not a camelCase-to-snake_case
+rule applied to whatever a payload happens to carry: a payload carrying
+`experienceValue`, `experience_Action` and `experienceactionn` reaches none of
+the four fields, and the emit is the same four keys it always was. And that the
+client stream reads them too, both streams being one code path taking a stream
+descriptor, so that stays true rather than being quietly special-cased later.
+
+23 of the 46 fail against 2.6. The other 23 pin behaviour that must not have
+changed.
+
+The harness needed nothing for this.
 
 ### What it covers (2.6)
 
@@ -495,7 +588,7 @@ the JS served on every page of that client's site.
 ### Adding a new version
 
 When a new tag version needs its own suite, copy the pattern in
-`test/runtime-tag-2.6.test.js`: point `TAG_PATHS` at the new file(s) and reuse
+`test/runtime-tag-2.6.1.test.js`: point `TAG_PATHS` at the new file(s) and reuse
 `test/harness.js` as-is, since the harness itself is version-agnostic. Bump
 `BUNDLE_VERSION` in `test/loader.test.js` too, so the loader suite exercises
 the current bundle.
