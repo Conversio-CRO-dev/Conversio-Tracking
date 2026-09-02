@@ -25,15 +25,27 @@ custom_domain = true
 # Caps requests per client key to a circuit-breaker level, not a normal-traffic
 # level - this exists so a scraped/abused key can't run up request costs or
 # degrade service for every other client sharing this Worker. period must be
-# 10 or 60 (a Workers platform constraint). Tune `limit` to comfortably clear
-# your busiest real client's peak traffic; 3000/60s (~50 req/s sustained) is
-# a starting point, not a measured value.
+# 10 or 60 (a Workers platform constraint).
+#
+# The limit is enforced per key *per Cloudflare location*, not globally, so
+# 30000/60s is 500 req/s per key in each colo independently. That is sized off
+# a 12M-users/month client on a campaign day: their busiest colo models to
+# 51-68 req/s depending on how geographically concentrated their traffic is,
+# so this sits roughly 7x clear of the worst case. The previous 3000 (50 req/s)
+# sat *below* that worst case, which would have served 429s to a real client at
+# their peak.
+#
+# Still a starting point rather than a measured value. Replace with ~10x the
+# real per-key peak req/s per colo once that is instrumented (via Analytics
+# Engine or the GraphQL analytics API, not per-request logging - see the
+# readiness assessment). Once it is sized off measurement, any 429 at all means
+# abuse or a runaway, never normal traffic, so alert on the first one.
 [[ratelimits]]
 name = "RATE_LIMITER"
 namespace_id = "1001"
 
   [ratelimits.simple]
-  limit = 3000
+  limit = 30000
   period = 60
 
 # Enables Cloudflare Workers Logs (dashboard-visible, queryable, and required
