@@ -117,6 +117,17 @@ tag initialised.
 `window.__conversioEnableEmission__()` and its two siblings stay and are
 unchanged, so a client already calling them keeps working exactly as before.
 
+The tag a client actually pastes for this is
+[`conversio_session_initiator_v1.5.js`](conversio_session_initiator_v1.5.js), fired
+on their own consent trigger. It pushes as above and then calls the control behind a
+`typeof` guard, which is not belt and braces for its own sake: a client pinned to a
+bundle older than 2.6.3 has no queue to drain, so the push alone would land in an
+array nothing reads, and rolling a client back a version is a normal part of
+releasing rather than only an un-migrated state. On 2.6.3 the guarded call is
+redundant rather than harmful, granting twice being idempotent. Version 1.4 called
+the control alone and loses the race described above whenever the loader serves the
+tag.
+
 On the Conversio names, the snake_case pair arrived in 2.4.2 and is where the
 naming is heading; the camelCase pair is what every client pushes today and stays
 supported. Nothing downstream of the match knows which name arrived, so a
