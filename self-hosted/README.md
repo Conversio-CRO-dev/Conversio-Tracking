@@ -315,10 +315,29 @@ storage**, so the segment lists above hold only what was reported to that stream
 a client segment never appears in `conversio_experiences`, and ours never appears
 in `client_experiences`.
 
-Consent covers both. `window.__conversioEnableEmission__()` opens the client
-stream alongside ours, so a consent platform needs no second call; the state is
-stored per stream (`conversioEmissionEnabled`, `clientEmissionEnabled`) so neither
-reads the other's key. The one boundary worth knowing: a visitor who consented
+Consent covers both. One signal opens the client stream alongside ours, so a
+consent platform needs no second call; the state is stored per stream
+(`conversioEmissionEnabled`, `clientEmissionEnabled`) so neither reads the other's
+key.
+
+**From 2.6.3 the signal is a queue push, and on a loader-served client it needs to
+be.** `window.__conversioEnableEmission__` is assigned when the tag executes, and
+the loader adds a DNS, TLS and Worker hop that the pasted-inline copy never had,
+so a consent platform resolving already-stored consent early in the page can call
+it before it exists. That throws in the client's own tag, writes nothing, and the
+platform does not fire again that session, so the visitor emits nothing at all
+while this Worker serves them a clean 200 the whole time. Pushing instead means
+the command waits for the tag rather than missing it:
+
+```js
+(window.conversioConsentQueue = window.conversioConsentQueue || []).push('granted');
+```
+
+See [Trigger events](../README.md#trigger-events) in the repo README for the full
+command vocabulary. The function stays and is unchanged, so a client already
+calling it keeps working; the queue is what a new client should be given.
+
+The one boundary worth knowing: a visitor who consented
 earlier in the same session on a pre-2.5 bundle has our key set and no client key,
 so their client events are held until consent is signalled again rather than being
 dropped, and arrive in full when it is.

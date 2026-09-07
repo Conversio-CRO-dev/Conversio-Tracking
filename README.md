@@ -76,10 +76,46 @@ a client send carries neither the `conversio_id` nor the vitals. See
 [the self-hosted README](self-hosted/README.md) for what each stream sends to
 GA4.
 
-Consent is one control for both, `window.__conversioEnableEmission__()` as
-before: it is a fact about the visitor rather than about a stream, so a consent
-platform needs no second call. The state is stored per stream, so neither reads
-the other's key.
+Consent is one signal for both streams: it is a fact about the visitor rather
+than about a stream, so a consent platform needs no second call. The state is
+stored per stream, so neither reads the other's key.
+
+**From 2.6.3, push it to `conversioConsentQueue` rather than calling the control
+directly.** The queue is the idiom to write against, and it exists for the reason
+the AB Tasty one does: the controls are assigned when this tag executes, and the
+loader delivers it through a container rather than inline, so a platform
+resolving already-stored consent early in the page loses that race as the
+ordinary case rather than the exception. A grant lost that way is not an error
+anywhere. It is a session that emits nothing while the loader serves a clean 200
+throughout.
+
+```js
+(window.conversioConsentQueue = window.conversioConsentQueue || []).push('granted');
+```
+
+Pushed before the tag, the command waits; pushed after, it applies on the push.
+So the one line above is correct wherever it runs, which matters because it is
+wired once per client by people who cannot know which order they will get.
+Consent stays the client's to signal and theirs to decide: this changes only how
+the signal arrives.
+
+It reads `enable`, `enabled`, `grant`, `granted` and `true` as a grant, the
+`disable`, `disabled`, `deny`, `denied` set and `false` as a withdrawal, and
+`flush` as a release of whatever is buffered without moving the gate, in any
+case. A GTM variable holding a consent state is as likely to resolve to a boolean
+as to a word, so both read the same way and there is one rule rather than two.
+Commands apply in the order they were pushed, so a platform that grants and then
+withdraws within one page lands on the withdrawal.
+
+Anything unrecognised is stepped over rather than falling back to a default,
+because the only useful default here would be a grant, and a queue that reads a
+typo as consent is worse than one that ignores it: the visitor never agreed, and
+nothing downstream could tell the difference. One malformed item does not end the
+drain, and a queue holding something that is not an array at all still leaves the
+tag initialised.
+
+`window.__conversioEnableEmission__()` and its two siblings stay and are
+unchanged, so a client already calling them keeps working exactly as before.
 
 On the Conversio names, the snake_case pair arrived in 2.4.2 and is where the
 naming is heading; the camelCase pair is what every client pushes today and stays
@@ -313,21 +349,21 @@ installs are required, only Node itself.
 Run the suite for the current version with:
 
 ```bash
-node test/runtime-tag-2.6.2.test.js
+node test/runtime-tag-2.6.3.test.js
 ```
 
-This runs the same set of checks against both shipped copies of the 2.6.2 tag,
-the GTM dev file (`conversio_runtime_tag_v2.6.2.js`) and the self-hosted bundle
-(`self-hosted/public/runtime-tag.2.6.2.js`), so the two can't silently diverge.
+This runs the same set of checks against both shipped copies of the 2.6.3 tag,
+the GTM dev file (`conversio_runtime_tag_v2.6.3.js`) and the self-hosted bundle
+(`self-hosted/public/runtime-tag.2.6.3.js`), so the two can't silently diverge.
 Since 2.4.1 the bundle is the comment-stripped build rather than a copy, which
 means the suite is verifying the exact bytes clients receive. A passing run looks
 like:
 
 ```
-conversio_runtime_tag_v2.6.2.js: 439 passed, 0 failed
-self-hosted/public/runtime-tag.2.6.2.js: 439 passed, 0 failed
+conversio_runtime_tag_v2.6.3.js: 498 passed, 0 failed
+self-hosted/public/runtime-tag.2.6.3.js: 498 passed, 0 failed
 
-TOTAL: 878 passed, 0 failed
+TOTAL: 996 passed, 0 failed
 ```
 
 There's a second suite for the self-hosted loader Worker, which runs it against
@@ -340,12 +376,54 @@ node test/loader.test.js
 ```
 
 Both exit non-zero if anything fails, so they're safe to wire into CI. Earlier
-versions keep their own suites (`test/runtime-tag-2.6.1.test.js`,
+versions keep their own suites (`test/runtime-tag-2.6.2.test.js`,
+`test/runtime-tag-2.6.1.test.js`,
 `test/runtime-tag-2.6.test.js`,
 `test/runtime-tag-2.5.1.test.js`, `test/runtime-tag-2.5.test.js`,
 `test/runtime-tag-2.4.2.test.js`, `test/runtime-tag-2.4.1.test.js`,
 `test/runtime-tag-2.4.test.js`, `test/runtime-tag-2.3.test.js`), which still pass
 and are worth keeping green while any client is pinned to those bundles.
+
+### What it covers (2.6.3)
+
+Everything in 2.6.2 below, plus section 29: the consent queue. Same arrangement
+as the AB Tasty queue and the same argument for it, applied to the gate rather
+than to a test, so the section is written as a contract as much as a behaviour.
+
+Both orders first, since that is the whole point: a grant queued before the tag
+opens the gate, one pushed after opens it on the push, and the same one-line
+snippet lands identically either side. Then that nothing queued opens nothing,
+which is the check that would fail if the drain were wired but inert. Then the
+vocabulary, one command at a time, in every spelling and in mixed case, with the
+boolean forms read the same way as the words.
+
+Then the branch that is a privacy requirement rather than a convenience. Eight
+plausible near-misses (`yes`, `accept`, `allow`, `on`, `1`, the string `true`,
+and the empty string) and four non-string literals must reach the gate as
+nothing at all, because the only useful default would be a grant. A queue reading
+a typo as consent is the one failure here that a visitor could reasonably object
+to, so it is pinned rather than assumed.
+
+Then order, which is what a platform that changes its mind depends on: grant then
+withdraw lands shut, withdraw then grant lands open, and a withdrawal on its own
+writes the shut state rather than leaving it unset. Then that one malformed item
+is stepped over and the good command behind it still applies, three of them in a
+row still do not end the drain, and five hostile queue values (a string, a
+number, an object with a non-function push, a null-prototype object, and a getter
+that throws) each leave the tag initialised with the controls exposed.
+
+Then the drain's position, which is the one thing here that is not local to the
+queue: it runs after the settings and before any dataLayer processing, so an
+experience already on the dataLayer emits under a queued grant rather than going
+into the buffer and straight back out, and the tracking ID is on the window
+before any of it runs, a flush being able to send to GA4. Then that `flush` moves
+the gate in neither direction. Last, that both entry points stay and agree: the
+three controls are still exposed, calling one directly still works, and the
+function and the queue produce the same state on both stream keys.
+
+Section 12's globals allow-list gained `conversioConsentQueue`, the tag now
+installing a live pusher at init. That the allow-list caught it is the point of
+having one.
 
 ### What it covers (2.6.2)
 
