@@ -11,6 +11,19 @@
 //   node manage-keys.mjs show <key>
 //   node manage-keys.mjs list
 //
+// Any command takes an optional --env, targeting a wrangler environment:
+//   node manage-keys.mjs list --env staging
+// With no --env this is production, matching wrangler, where production is the
+// top-level config rather than a named environment. The flag is stripped before
+// dispatch so no command has to know about it, and the environment is printed
+// by every mutating command: the whole hazard a staging flag introduces is
+// doing the right thing to the wrong environment.
+//
+// A non-production environment needs CONVERSIO_LOADER_ORIGIN set to its
+// hostname, which `issue` prints into the snippet and `verify` fetches. There is
+// deliberately no default, since a wrong guess would have `verify` reporting
+// confidently on a URL nobody is serving.
+//
 // Optional env vars CF_API_TOKEN + CF_ZONE_ID (see README) enable an active
 // cache purge after revoke/activate/update, so the change takes effect in
 // seconds instead of waiting out the edge cache. Without them, everything
@@ -21,7 +34,44 @@ import { execFileSync } from 'node:child_process';
 
 const NAMESPACE_BINDING = 'CLIENT_KEYS';
 const WRANGLER_CONFIG = new URL('../wrangler.toml', import.meta.url).pathname;
-const LOADER_ORIGIN = 'https://tag.conversio.dev';
+const PRODUCTION_ORIGIN = 'https://tag.conversio.dev';
+
+// Pulled out of process.argv before dispatch, so each command's own flag
+// parsing is untouched by it.
+function extractEnv(argv) {
+  const i = argv.indexOf('--env');
+  if (i === -1) return { env: null, argv };
+
+  const value = argv[i + 1];
+  if (!value || value.startsWith('--')) {
+    console.error('--env needs a value, e.g. --env staging');
+    process.exit(1);
+  }
+  return { env: value, argv: argv.slice(0, i).concat(argv.slice(i + 2)) };
+}
+
+const { env: ENV, argv: ARGV } = extractEnv(process.argv.slice(2));
+
+// Production is the top-level wrangler config and takes no --env, so an
+// environment being set at all means this is not production.
+function loaderOrigin() {
+  if (!ENV) return PRODUCTION_ORIGIN;
+
+  const origin = (process.env.CONVERSIO_LOADER_ORIGIN || '').replace(/\/+$/, '');
+  if (!origin) {
+    console.error(`--env ${ENV} needs CONVERSIO_LOADER_ORIGIN set to that environment's hostname, e.g.`);
+    console.error('  CONVERSIO_LOADER_ORIGIN=https://conversio-tag-loader-staging.<subdomain>.workers.dev');
+    console.error('No default on purpose: guessing it would have `verify` report on a URL nobody serves.');
+    process.exit(1);
+  }
+  return origin;
+}
+
+// Printed by every command that writes, because the failure this flag creates
+// is doing the right thing to the wrong environment.
+function announceEnv() {
+  console.log(ENV ? `(environment: ${ENV})` : '(environment: production)');
+}
 
 // A GA measurement ID. Checked here so a typo is caught while someone is still
 // looking at the terminal, rather than shipping a dead property ID that nobody
@@ -48,7 +98,8 @@ function normaliseTrackingId(raw) {
 }
 
 function wrangler(args) {
-  return execFileSync('npx', ['wrangler', ...args, '--config', WRANGLER_CONFIG], {
+  const envArgs = ENV ? ['--env', ENV] : [];
+  return execFileSync('npx', ['wrangler', ...args, '--config', WRANGLER_CONFIG, ...envArgs], {
     encoding: 'utf8'
   });
 }
@@ -80,6 +131,14 @@ function kvGet(key) {
 }
 
 async function purgeUrl(key) {
+  // The purge targets a zone on conversio.dev. A non-production environment is
+  // on workers.dev, which is not that zone and has nothing cached in front of
+  // it anyway, so purging would either fail or clear something else entirely.
+  if (ENV) {
+    console.log(`(environment ${ENV} is not behind the conversio.dev zone, skipping cache purge)`);
+    return;
+  }
+
   const token = process.env.CF_API_TOKEN;
   const zoneId = process.env.CF_ZONE_ID;
   if (!token || !zoneId) {
@@ -93,7 +152,7 @@ async function purgeUrl(key) {
       Authorization: `Bearer ${token}`,
       'Content-Type': 'application/json'
     },
-    body: JSON.stringify({ files: [`${LOADER_ORIGIN}/t/${key}.js`] })
+    body: JSON.stringify({ files: [`${loaderOrigin()}/t/${key}.js`] })
   });
 
   const body = await res.json();
@@ -136,7 +195,7 @@ function cmdIssue(argv) {
     console.log('(no --tracking-id set - window.conversioSettings.trackingId will be null for this client; add one later with `update`)');
   }
   console.log('\nGTM Custom HTML tag content:\n');
-  console.log(`<script src="${LOADER_ORIGIN}/t/${key}.js" async></script>`);
+  console.log(`<script src="${loaderOrigin()}/t/${key}.js" async></script>`);
 }
 
 async function cmdRevoke(argv) {
@@ -221,7 +280,7 @@ async function cmdVerify(argv) {
   const key = argv[0];
   if (!key) { console.error('Usage: verify <key>'); process.exit(1); }
 
-  const url = `${LOADER_ORIGIN}/t/${key}.js`;
+  const url = `${loaderOrigin()}/t/${key}.js`;
   const res = await fetch(url);
   const body = await res.text();
 
@@ -252,7 +311,9 @@ async function cmdVerify(argv) {
   console.log('Check the key exists, is active, and (if domain-locked) that you are testing from an allowed origin.');
 }
 
-const [, , command, ...rest] = process.argv;
+const [command, ...rest] = ARGV;
+
+if (['issue', 'revoke', 'activate', 'update'].includes(command)) announceEnv();
 
 switch (command) {
   case 'issue': cmdIssue(rest); break;

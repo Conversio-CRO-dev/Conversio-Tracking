@@ -98,6 +98,89 @@ environment).
 
 ---
 
+## Staging
+
+`[env.staging]` in `wrangler.toml` deploys a second Worker,
+`conversio-tag-loader-staging`, on its own `*.workers.dev` hostname. It exists so
+a change can be exercised somewhere that is not the hostname every client
+depends on, and so the fault matrix below has somewhere to run: reproducing a KV
+outage or a malformed record means writing probe keys, which must never go near
+the production namespace.
+
+```bash
+npx wrangler deploy --env staging
+```
+
+Three things about environments are worth knowing before touching this, because
+two of them are quiet:
+
+- **`routes` is inherited.** An environment without its own `routes` block gets
+  `tag.conversio.dev`, and wrangler treats reassigning a custom domain as a
+  **warning, not an error**. Deploying staging without `routes = []` moves the
+  live hostname onto a Worker bound to an empty KV namespace: every real key
+  reads as unknown, every visitor is served `// conversio: inactive` with a 200,
+  and no client sees an error. The config carries `routes = []` and
+  `workers_dev = true` for exactly this reason.
+- **`kv_namespaces` and `ratelimits` are not inherited**, and wrangler warns
+  about both, so their absence is at least noisy rather than silent. Staging has
+  its own KV namespace and its own rate limit `namespace_id` (`1002`, not
+  production's `1001`, since bindings sharing a namespace share counters across
+  Workers on the same account). Its limit is deliberately tiny, 60/60s, so the
+  429 branch is reachable by hand rather than needing a load generator.
+- **`assets` *is* inherited**, so staging serves the same `./public` from the
+  same working tree.
+
+Production stays the top-level config rather than an `[env.production]` block,
+because naming an environment renames the Worker and would deploy a *new* one,
+leaving the existing Worker and its custom domain behind. So `npx wrangler
+deploy` with no `--env` is the production deploy, and it now prints a warning
+that no target environment was specified. That warning is expected, and the
+obvious fix for it is the wrong one.
+
+### Managing staging keys
+
+Every `manage-keys.mjs` command takes `--env`, and needs
+`CONVERSIO_LOADER_ORIGIN` pointed at that environment's hostname so `issue`
+prints the right snippet and `verify` fetches the right URL:
+
+```bash
+export CONVERSIO_LOADER_ORIGIN=https://conversio-tag-loader-staging.conversio-tag-loader.workers.dev
+node scripts/manage-keys.mjs list --env staging
+node scripts/manage-keys.mjs issue --client "Staging Active" --version 2.6.3 --env staging
+```
+
+Mutating commands print the environment they are acting on, since the hazard the
+flag introduces is doing the right thing to the wrong one. Cache purge is skipped
+for any non-production environment, workers.dev not being behind the
+`conversio.dev` zone.
+
+### The fault matrix
+
+Staging is seeded with keys that reproduce each way the loader can fail. Every
+one must answer with a JavaScript content type: the property being held is that
+nothing this Worker depends on can put an HTML error page into a client's
+`<script>` tag.
+
+| Key | Reproduces | Expected |
+| --- | --- | --- |
+| an `issue`d key | the happy path | 200, the bundle, tracking ID patched |
+| `cvo_stg_revoked00000000` | a revoked client | 200, inactive |
+| `cvo_stg_domainlocked00` | an origin allow-list | inactive on a wrong or absent `Referer`, bundle on a right one |
+| `cvo_stg_missingver0000` | pinned to a version nobody deployed | 200, inactive, `asset_missing` logged |
+| `cvo_stg_noversion00000` | a record that forgot its version | 200, inactive (not a 2.2 fallback) |
+| `cvo_stg_badversion0000` | a version that is not version-shaped | 200, inactive, `version_invalid` logged |
+| `cvo_stg_notjson0000000` | a record hand-edited into invalid JSON | 200, **unavailable**, `no-store` |
+| `cvo_stg_barestring0000` | a record that parsed but is not an object | 200, inactive |
+| `cvo_stg_hostileid00000` | a `trackingId` that is not safe to splice | 200, the bundle, ID dropped |
+
+The malformed-JSON row is the one to keep: before the loader guarded its
+bindings, that case threw out of `fetch()` and Cloudflare answered it with a 500
+carrying an HTML body. Also check a `POST` to a live key returns 405 rather than
+the inactive stub, and that `/t/../runtime-tag.<v>.js` and
+`/runtime-tag.<v>.js` are both 404.
+
+---
+
 ## Managing clients
 
 All of these use the CLI in `scripts/manage-keys.mjs`, run from this
