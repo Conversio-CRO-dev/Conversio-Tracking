@@ -38,19 +38,26 @@ function makeEnv(record, opts) {
   opts = opts || {};
   return {
     CLIENT_KEYS: {
-      get: function () { return Promise.resolve(record); }
+      get: function () {
+        if (opts.kvThrows) return Promise.reject(new Error('KV internal error'));
+        if (opts.kvBadJson) return Promise.reject(new SyntaxError('Unexpected token'));
+        return Promise.resolve(record);
+      }
     },
     ASSETS: {
       fetch: function (request) {
+        if (opts.assetsThrow) return Promise.reject(new Error('asset fetch failed'));
         var name = new URL(request.url).pathname.replace(/^\//, '');
         var file = path.join(PUBLIC_DIR, name);
         if (!fs.existsSync(file)) return Promise.resolve(new Response('missing', { status: 404 }));
         return Promise.resolve(new Response(fs.readFileSync(file, 'utf8'), { status: 200 }));
       }
     },
-    RATE_LIMITER: opts.rateLimited
-      ? { limit: function () { return Promise.resolve({ success: false }); } }
-      : null
+    RATE_LIMITER: opts.rateLimiterThrows
+      ? { limit: function () { return Promise.reject(new Error('rate limiter down')); } }
+      : opts.rateLimited
+        ? { limit: function () { return Promise.resolve({ success: false }); } }
+        : null
   };
 }
 
@@ -59,7 +66,8 @@ function get(loader, record, opts) {
   var headers = {};
   if (opts.referer) headers.Referer = opts.referer;
   var url = ORIGIN + (opts.path || ('/t/' + KEY + '.js'));
-  return loader.fetch(new Request(url, { headers: headers }), makeEnv(record, opts));
+  return loader.fetch(new Request(url, { headers: headers, method: opts.method || 'GET' }),
+    makeEnv(record, opts));
 }
 
 function activeRecord(extra) {
@@ -159,6 +167,95 @@ async function main() {
   var oldBody = await oldRes.text();
   check('older bundle version still serves',
     oldRes.status === 200 && oldBody.indexOf('version 2.3') !== -1, 'status ' + oldRes.status);
+
+
+  // 7. The hardening that 'pre-launch-fixes' adds. Every case here must come
+  //    back as JavaScript: the whole point is that nothing this Worker depends
+  //    on can put an HTML error page into a client's <script> tag.
+  function isJs(res) {
+    return (res.headers.get('content-type') || '').indexOf('javascript') !== -1;
+  }
+
+  // The live defect. A POST to a real key used to return 200 with the inactive
+  // stub, because new Request(assetUrl, request) copied the method onto the
+  // subrequest and the assets binding refused it.
+  var posted = await get(loader, activeRecord(), { method: 'POST' });
+  check('a POST is 405, not the inactive stub', posted.status === 405, 'status ' + posted.status);
+  check('and says which methods are allowed',
+    (posted.headers.get('allow') || '').indexOf('GET') !== -1, posted.headers.get('allow'));
+  check('and is still JavaScript, so a stray POST cannot inject HTML', isJs(posted));
+
+  var headed = await get(loader, activeRecord(), { method: 'HEAD' });
+  check('a HEAD still succeeds, uptime checks using it keep working',
+    headed.status === 200, 'status ' + headed.status);
+
+  var putted = await get(loader, activeRecord(), { method: 'PUT', path: '/nope.js' });
+  check('an unmatched path is still 404 whatever the method',
+    putted.status === 404, 'status ' + putted.status);
+
+  // DEFAULT_VERSION is gone, so a record that forgot its version is surfaced
+  // rather than being served a 2.2 bundle that reports nothing.
+  var noVersion = await get(loader, { status: 'active', client: 'Acme Co' });
+  var noVersionBody = await noVersion.text();
+  check('a record with no version serves no bundle',
+    noVersionBody.indexOf('CONVERSIO TAG') === -1, noVersionBody.trim());
+  check('and does not fall back to 2.2',
+    noVersionBody.indexOf('version 2.2') === -1);
+
+  // The version reaches a URL, so it is validated rather than trusted.
+  var badVersions = ['../secrets', '2.6.3/../..', 'latest', '', '2', 'a.b.c', '2.6.3;rm'];
+  for (i = 0; i < badVersions.length; i++) {
+    var bv = await get(loader, activeRecord({ version: badVersions[i] }));
+    var bvBody = await bv.text();
+    check('an unsafe version (' + JSON.stringify(badVersions[i]) + ') serves no bundle',
+      bvBody.indexOf('CONVERSIO TAG') === -1 && isJs(bv), bvBody.trim().slice(0, 60));
+  }
+
+  // Binding failures. Before this change each of these threw out of fetch(),
+  // which Cloudflare turns into a 1101 HTML error page.
+  var kvDown = await get(loader, activeRecord(), { kvThrows: true });
+  check('KV unavailable serves a harmless script, not a 500',
+    kvDown.status === 200 && isJs(kvDown), 'status ' + kvDown.status);
+  check('and is not cached, so the next page load re-decides',
+    (kvDown.headers.get('cache-control') || '').indexOf('no-store') !== -1,
+    kvDown.headers.get('cache-control'));
+
+  var kvJunk = await get(loader, activeRecord(), { kvBadJson: true });
+  check('a record holding malformed JSON serves a harmless script',
+    kvJunk.status === 200 && isJs(kvJunk), 'status ' + kvJunk.status);
+
+  var assetsDown = await get(loader, activeRecord(), { assetsThrow: true });
+  check('the assets binding throwing serves a harmless script',
+    assetsDown.status === 200 && isJs(assetsDown), 'status ' + assetsDown.status);
+
+  // The limiter is a cost cap, not a dependency of delivery, so it fails open.
+  var rlDown = await get(loader, activeRecord({ trackingId: 'G-J4EDMZMNY9' }), { rateLimiterThrows: true });
+  var rlBody = await rlDown.text();
+  check('a broken rate limiter fails open and still serves the bundle',
+    rlBody.indexOf('CONVERSIO TAG') !== -1, rlBody.trim().slice(0, 60));
+
+  // A record that parsed but is not an object.
+  var strRecord = await get(loader, 'active');
+  check('a record that is a bare string serves no bundle',
+    (await strRecord.text()).indexOf('CONVERSIO TAG') === -1);
+
+  // The key is a bearer credential and must not be logged whole.
+  var logged = [];
+  var realLog = console.log;
+  console.log = function (line) { logged.push(String(line)); };
+  try {
+    await get(loader, null);
+    await get(loader, activeRecord({ status: 'revoked' }));
+    await get(loader, activeRecord(), { rateLimited: true });
+  } finally {
+    console.log = realLog;
+  }
+  check('logs carry a truncated key, never the whole one',
+    logged.length > 0 && logged.every(function (l) { return l.indexOf(KEY) === -1; }),
+    logged.join(' | '));
+  check('and still carry enough of it to identify the client',
+    logged.every(function (l) { return l.indexOf(KEY.slice(0, 12)) !== -1; }),
+    logged.join(' | '));
 
   console.log('\nself-hosted/src/index.js: ' + pass + ' passed, ' + fail + ' failed\n');
   process.exit(fail ? 1 : 0);
