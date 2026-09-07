@@ -132,10 +132,20 @@ two of them are quiet:
 
 Production stays the top-level config rather than an `[env.production]` block,
 because naming an environment renames the Worker and would deploy a *new* one,
-leaving the existing Worker and its custom domain behind. So `npx wrangler
-deploy` with no `--env` is the production deploy, and it now prints a warning
-that no target environment was specified. That warning is expected, and the
-obvious fix for it is the wrong one.
+leaving the existing Worker and its custom domain behind. So the production
+deploy is:
+
+```bash
+npx wrangler deploy --env=""
+```
+
+The empty string is wrangler's own way of naming the top-level environment, and
+it is what wrangler suggests once a config defines environments. It resolves
+identically to a bare `npx wrangler deploy`, same namespace, same rate limit,
+byte-identical worker, same Worker name, but without the warning that no target
+environment was specified. Prefer it, because the obvious reading of that
+warning is to pass `--env production`, and that is the one thing that must not
+happen here.
 
 ### Managing staging keys
 
