@@ -50,5 +50,93 @@ namespace_id = "1001"
 
 # Enables Cloudflare Workers Logs (dashboard-visible, queryable, and required
 # for `wrangler tail` to show anything beyond the current terminal session).
+# The top-level `enabled` is the master switch and is required: Cloudflare's
+# docs are explicit that nested properties alone do not turn logging on, so
+# `[observability.logs]` without this reads as valid to wrangler (no warning at
+# deploy) while leaving Workers Logs off. Since the loader logs only exception
+# paths, "off" and "nothing went wrong" look identical, which is the wrong thing
+# to be uncertain about when this is the only monitoring there is.
 [observability]
+enabled = true
+
+# invocation_logs is true by default, so this states the default rather than
+# changing it. It is here to be found: at portfolio volume it is the setting to
+# turn off, one event per invocation being what would run past the 20M events
+# per month the paid plan includes, whereas the reason-coded logs above are
+# rare by design.
+[observability.logs]
+invocation_logs = true
+
+[observability.traces]
+enabled = false
+
+
+# ---------------------------------------------------------------------------
+# Production is the TOP-LEVEL config above, not an [env.production] block, and
+# it has to stay that way. Naming an environment renames the Worker, Cloudflare
+# appending -<env>, so an [env.production] would deploy a NEW Worker called
+# conversio-tag-loader-production and leave the existing one, and its custom
+# domain, behind.
+#
+# So the production deploy is:
+#
+#   npx wrangler deploy --env=""
+#
+# The empty string is wrangler's own way of saying "the top-level environment",
+# and it is what it suggests when a config defines environments and a deploy
+# names none. Verified identical to a bare `wrangler deploy`: same KV namespace,
+# same rate limit, byte-identical built worker, same Worker name. Prefer it,
+# because a bare deploy warns and the obvious reading of that warning is to add
+# `--env production`, which is the one thing that must not happen here: it would
+# deploy a new Worker and leave this one, and its custom domain, behind.
+#
+# Staging. Deploys as a separate Worker, conversio-tag-loader-staging, since
+# Cloudflare appends -<env> to the name. Exists so a change can be exercised
+# somewhere that is not the hostname every client depends on, and so the fault
+# matrix has somewhere to run: reproducing a KV outage or a malformed record
+# means writing probe keys, which must never go near the production namespace.
+#
+# Everything that holds state is redeclared below, because environments inherit
+# less than they look like they do. `assets` IS inherited, so staging serves the
+# same ./public from the same working tree. `kv_namespaces` and `ratelimits` are
+# NOT, and wrangler warns about both, so their absence would be noticed.
+# `routes` is the one that would not be, and it is the dangerous one.
+[env.staging]
+
+# NOT optional, and not tidiness. `routes` is inherited, so an environment
+# without its own gets tag.conversio.dev, and wrangler says of that:
+#   "Deploying this environment will reassign these custom domains away from
+#    the top-level Worker."
+# That is a WARNING, not an error. Deploying staging without this line moves the
+# live hostname onto a Worker bound to an empty KV namespace: every real key
+# reads as unknown, every visitor is served "// conversio: inactive" with a 200,
+# and no client sees an error. Verified against wrangler 4.129 rather than
+# assumed. workers_dev gives staging its own *.workers.dev hostname instead, so
+# it needs no DNS record and cannot collide with a real one.
+workers_dev = true
+routes = []
+
+# Its own namespace, so seeding a probe key or tearing one down cannot touch a
+# live record. Created with:
+#   npx wrangler kv namespace create CLIENT_KEYS --env staging
+[[env.staging.kv_namespaces]]
+binding = "CLIENT_KEYS"
+id = "25dba15f72f745c6a8c0ddd146e298c4"
+
+# MUST differ from production's "1001". Cloudflare: "Two rate limiting bindings
+# that share the same namespace_id - even across different Workers on the same
+# account - share the same rate limit counters for a given key." A soak here on
+# 1001 would spend production's budget and serve 429s to real clients in
+# whichever colo it ran from. The limit is deliberately tiny: staging exists to
+# make the 429 branch reachable by hand, which 60/60s does in a one-line loop,
+# where production's 30000 would take a load generator.
+[[env.staging.ratelimits]]
+name = "RATE_LIMITER"
+namespace_id = "1002"
+
+  [env.staging.ratelimits.simple]
+  limit = 60
+  period = 60
+
+[env.staging.observability]
 enabled = true
