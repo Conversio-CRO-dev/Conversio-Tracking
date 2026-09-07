@@ -50,5 +50,23 @@ namespace_id = "1001"
 
 # Enables Cloudflare Workers Logs (dashboard-visible, queryable, and required
 # for `wrangler tail` to show anything beyond the current terminal session).
+# The top-level `enabled` is the master switch and is required: Cloudflare's
+# docs are explicit that nested properties alone do not turn logging on, so
+# `[observability.logs]` without this reads as valid to wrangler (no warning at
+# deploy) while leaving Workers Logs off. Since the loader logs only exception
+# paths, "off" and "nothing went wrong" look identical, which is the wrong thing
+# to be uncertain about when this is the only monitoring there is.
 [observability]
 enabled = true
+
+# invocation_logs is true by default, so this states the default rather than
+# changing it. It is here to be found: at portfolio volume it is the setting to
+# turn off, one event per invocation being what would run past the 20M events
+# per month the paid plan includes, whereas the reason-coded logs above are
+# rare by design.
+[observability.logs]
+invocation_logs = true
+
+[observability.traces]
+enabled = false
+
