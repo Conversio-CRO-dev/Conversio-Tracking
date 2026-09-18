@@ -11,6 +11,11 @@
 //   node manage-keys.mjs show <key>
 //   node manage-keys.mjs list
 //
+// A --version is checked against the bundles in public/ before anything is
+// written, for both issue and update. Pinning a key to a version nobody
+// deployed is not a visible error: the Worker serves that client the inactive
+// stub behind a clean 200 and their tracking simply stops.
+//
 // Any command takes an optional --env, targeting a wrangler environment:
 //   node manage-keys.mjs list --env staging
 // With no --env this is production, matching wrangler, where production is the
@@ -30,6 +35,7 @@
 // still works, just with the slower default propagation.
 
 import { randomBytes } from 'node:crypto';
+import { readdirSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 
 const NAMESPACE_BINDING = 'CLIENT_KEYS';
@@ -79,6 +85,63 @@ function announceEnv() {
 // on the way out (see src/index.js) since a record edited straight in the
 // Cloudflare dashboard never comes through here.
 const TRACKING_ID_PATTERN = /^G-[A-Z0-9]{4,20}$/;
+
+// The bundles the Worker serves from, and the only versions a key can name.
+const BUNDLE_DIR = new URL('../public/', import.meta.url);
+const BUNDLE_NAME = /^runtime-tag\.([0-9]+(?:\.[0-9]+){1,3})\.js$/;
+
+// Numeric per component, so 3.1 sorts above 2.6.3 rather than below it the way
+// a string compare would have it.
+function compareVersions(a, b) {
+  const pa = a.split('.').map(Number);
+  const pb = b.split('.').map(Number);
+  for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
+    const d = (pa[i] || 0) - (pb[i] || 0);
+    if (d) return d;
+  }
+  return 0;
+}
+
+function availableVersions() {
+  try {
+    return readdirSync(BUNDLE_DIR)
+      .map((name) => (name.match(BUNDLE_NAME) || [])[1])
+      .filter(Boolean)
+      .sort(compareVersions);
+  } catch (e) {
+    return [];
+  }
+}
+
+// A version is spliced into an asset URL by the Worker and decides what every
+// page of a client's site runs, so a typo in one is not a typo. The Worker finds
+// no such asset, logs asset_missing, and serves the inactive stub: that client's
+// tracking goes silent behind a clean 200, with nothing surfaced to them or to
+// whoever ran this. Much cheaper to fail at the terminal while someone is still
+// looking at it.
+//
+// What this checks is the working tree, which is where a deploy comes from, and
+// deliberately not the deployment. The bundle is not fetchable at a bare path,
+// the Worker answering anything but /t/<key>.js with a 404, so there is nothing
+// to probe from out here. `verify` is what proves what a client is really being
+// served, and it stays the step after any change to a version.
+function checkVersion(raw) {
+  const value = String(raw).trim();
+  const versions = availableVersions();
+
+  if (versions.indexOf(value) !== -1) return value;
+
+  console.error(`No bundle for version "${value}" in self-hosted/public/.`);
+  if (versions.length) {
+    console.error(`Available: ${versions.join(', ')}`);
+    console.error('Pinning a key to a version nobody deployed serves that client the inactive');
+    console.error('stub, which looks to them exactly like working tracking that reports nothing.');
+    console.error('If the version is real but new, pull first: this reads your working tree.');
+  } else {
+    console.error('No bundles found there at all. Run this from the self-hosted/ directory.');
+  }
+  process.exit(1);
+}
 
 // Matches the line the Worker substitutes, so `verify` can report what a
 // client is actually being served rather than what KV claims.
@@ -170,11 +233,17 @@ function cmdIssue(argv) {
     process.exit(1);
   }
 
+  // Before the key is generated and before anything is written, so a bad
+  // version costs nothing and leaves nothing behind. The default goes through
+  // the same check, an unvalidated default being exactly as dangerous as an
+  // unvalidated flag.
+  const version = checkVersion(flags.version || '2.2');
+
   const key = generateKey();
   const record = {
     status: 'active',
     client: flags.client,
-    version: flags.version || '2.2'
+    version: version
   };
   if (flags.domains) {
     record.domains = flags.domains.split(',').map((d) => d.trim()).filter(Boolean);
@@ -228,12 +297,17 @@ async function cmdUpdate(argv) {
   const [key, ...flagArgv] = argv;
   if (!key) { console.error('Usage: update <key> [--client "Acme Co"] [--version 2.2] [--domains a.com,b.com] [--tracking-id G-XXXXXXXXXX]'); process.exit(1); }
 
+  // Flags are parsed and the version checked before the lookup, so a typo fails
+  // at the terminal without a network round trip and without a record sitting
+  // half-updated in memory.
+  const flags = parseFlags(flagArgv);
+  const version = flags.version ? checkVersion(flags.version) : null;
+
   const record = kvGet(key);
   if (!record) { console.error('No record found for that key'); process.exit(1); }
 
-  const flags = parseFlags(flagArgv);
   if (flags.client) record.client = flags.client;
-  if (flags.version) record.version = flags.version;
+  if (version) record.version = version;
   if (flags.domains) record.domains = flags.domains.split(',').map((d) => d.trim()).filter(Boolean);
   // Present-but-empty (--tracking-id "") clears it, so a wrong ID can be
   // removed and not just replaced.

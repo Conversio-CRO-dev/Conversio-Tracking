@@ -208,9 +208,20 @@ Optional flags:
 - `--version 2.5.1` pins that client to a specific bundle in `public/`. Useful
   if a client needs to stay on an older version while others move forward.
   Note this defaults to `2.2`, not to the newest bundle present, so pass it
-  explicitly when issuing a key for a current-version client. Same for
-  `DEFAULT_VERSION` in `src/index.js`, which covers a record with no version
-  at all.
+  explicitly when issuing a key for a current-version client.
+
+  The value is checked against the bundles actually in `public/` before
+  anything is written, and an unknown one fails at the terminal listing what
+  is available. That check exists because the failure it prevents is invisible:
+  a key pinned to a version nobody deployed makes the Worker log
+  `asset_missing` and serve that client the inactive stub, so their tracking
+  stops behind a clean 200 with nothing surfaced to them or to you. It reads
+  your working tree rather than the deployment, so `verify` remains the step
+  that proves what a client is really being served.
+
+  There is **no `DEFAULT_VERSION`** in `src/index.js`. A record with no version,
+  or one that is not version-shaped, gets the inactive stub and a
+  `version_invalid` log rather than falling back to some other client's bundle.
 - `--domains acme.com,www.acme.com` locks the key to those origins, checked
   against the `Referer` header (script tags don't send `Origin`). Only set
   this if you're confident the client site doesn't run a `no-referrer`
@@ -548,6 +559,12 @@ Moving one client over is the risky step, and it's one command:
 ```bash
 node scripts/manage-keys.mjs update cvo_xxxxxxxxxxxxxxxxxxxxxxxx --version 2.5.1
 ```
+
+The version is checked against `public/` before the key is even looked up, so a
+typo costs a terminal error rather than a silent outage on that client. What is
+not checked is the key: one mistyped key moves the wrong client, and nothing
+asks you to confirm. Run `show` first and `list` after, which is also the
+record you would roll back from.
 
 Rolling that client back is the same command with the old version, taking
 effect as soon as the cache purge lands.
