@@ -583,6 +583,58 @@ sends only `Referer`. With no allow-list configured the route echoes whatever
 origin asked, which rests entirely on the two unguessable secrets involved, a
 client key and a CSPRNG visitor id.
 
+### Loading audience data
+
+`scripts/manage-audiences.mjs` takes a BigQuery export and writes it into the
+`AUDIENCES` namespace. Export the table with the three fields it wants:
+
+```bash
+bq query --nouse_legacy_sql --format=json \
+  'SELECT conversio_id, audiences, UNIX_SECONDS(computed_at) AS ts
+     FROM `PROJECT.conversio_v3.audience_membership`' > rows.json
+```
+
+Then check it before it goes anywhere:
+
+```bash
+node scripts/manage-audiences.mjs load cvo_xxxxxxxxxxxxxxxxxxxxxxxx --file rows.json --dry-run
+```
+
+`--dry-run` validates every row and prints what would be written, touching no
+network at all, so it is a real check of an export rather than a check that
+happens to skip the last step. Drop the flag to write.
+
+```bash
+node scripts/manage-audiences.mjs show cvo_xxxxxxxxxxxxxxxxxxxxxxxx con_....1700000000000000
+node scripts/manage-audiences.mjs list cvo_xxxxxxxxxxxxxxxxxxxxxxxx
+node scripts/manage-audiences.mjs delete cvo_xxxxxxxxxxxxxxxxxxxxxxxx con_....1700000000000000
+```
+
+`delete` removes one visitor, which is what an erasure request needs. There is
+deliberately no bulk delete: emptying a client's audiences is a thing to do
+rarely and on purpose, and a reload overwrites anyway. Note it reaches one of
+three stores, the BigQuery row and any cookie already on that visitor's browser
+being unaffected.
+
+**A bad row refuses the whole file.** A half-loaded dataset is worse than a
+refused one, because the rows that landed are indistinguishable from correct ones
+afterwards and the codes come from a job nobody is watching. `--skip-invalid`
+loads the valid rows and reports the rest, for when that is what you want.
+
+It reads what `bq` actually produces rather than one assumed shape: a JSON array
+or newline-delimited JSON, `INT64` arriving quoted as BigQuery renders it, a
+`computed_at` timestamp where the export forgot to convert it, and the
+`[{"v": "..."}]` form some paths use for repeated fields.
+
+Two refusals worth knowing about. A client key of the wrong shape is refused
+before the file is even read, because writing a dataset under a mistyped key
+leaves it orphaned and invisible rather than failing. And a client without
+`--audiences true` is refused with the command to fix it, since data loaded for a
+key that cannot serve it is silently wasted; `--force` loads it anyway.
+
+Covered by `test/manage-audiences.test.js`, which drives the real CLI through
+`--dry-run` against every shape above.
+
 ### What is validated, and why twice
 
 A code ends up inside a comma-delimited cookie value on the client's own domain.
