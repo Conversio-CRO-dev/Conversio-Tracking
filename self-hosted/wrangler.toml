@@ -26,7 +26,7 @@ id = "f5e336ebb4a54c6484b00c08de29ef86"
 # a 503 on that route and nothing else, so deploying before it exists is safe.
 [[kv_namespaces]]
 binding = "AUDIENCES"
-id = "REPLACE_ME_AUDIENCES_NAMESPACE_ID"
+id = "7ec073b6198e44b88f691b81129739c3"
 
 # Its own limiter, and its own namespace_id, because bindings sharing a
 # namespace_id share counters: on RATE_LIMITER an audience lookup would spend the
@@ -168,7 +168,7 @@ namespace_id = "1002"
 
 [[env.staging.kv_namespaces]]
 binding = "AUDIENCES"
-id = "REPLACE_ME_STAGING_AUDIENCES_NAMESPACE_ID"
+id = "e6dbc485bb5d4800b635875e6c2ff58e"
 
 # MUST differ from production's 1003, for the reason 1002 differs from 1001.
 [[env.staging.ratelimits]]
