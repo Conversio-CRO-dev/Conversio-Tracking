@@ -16,6 +16,34 @@ run_worker_first = true
 binding = "CLIENT_KEYS"
 id = "f5e336ebb4a54c6484b00c08de29ef86"
 
+# v3 audiences: conversio_id -> audience codes, read by the /a/ route. A second
+# namespace rather than a corner of CLIENT_KEYS, for three reasons: a different
+# write path (a scheduled job, not a human at a CLI), a different blast radius,
+# and a token scoped to this namespace that must never reach the client keys.
+#
+# Create with: wrangler kv namespace create AUDIENCES
+# Then replace the placeholder below. The Worker treats an unbound namespace as
+# a 503 on that route and nothing else, so deploying before it exists is safe.
+[[kv_namespaces]]
+binding = "AUDIENCES"
+id = "REPLACE_ME_AUDIENCES_NAMESPACE_ID"
+
+# Its own limiter, and its own namespace_id, because bindings sharing a
+# namespace_id share counters: on RATE_LIMITER an audience lookup would spend the
+# bundle's budget and a busy client could 429 their own tag.
+#
+# Sized differently too. The bundle is fetched once per page view; this is
+# fetched once per visitor per day, the tag gating it on cookie freshness, so the
+# real rate is orders of magnitude lower. 3000/60s is a circuit breaker well
+# clear of any plausible real traffic rather than a tuned figure.
+[[ratelimits]]
+name = "AUDIENCE_LIMITER"
+namespace_id = "1003"
+
+  [ratelimits.simple]
+  limit = 3000
+  period = 60
+
 # Custom Domains map the whole hostname to this Worker (no path wildcards
 # allowed here) - path routing for /t/<key>.js happens inside src/index.js.
 [[routes]]
@@ -133,6 +161,19 @@ id = "25dba15f72f745c6a8c0ddd146e298c4"
 [[env.staging.ratelimits]]
 name = "RATE_LIMITER"
 namespace_id = "1002"
+
+  [env.staging.ratelimits.simple]
+  limit = 60
+  period = 60
+
+[[env.staging.kv_namespaces]]
+binding = "AUDIENCES"
+id = "REPLACE_ME_STAGING_AUDIENCES_NAMESPACE_ID"
+
+# MUST differ from production's 1003, for the reason 1002 differs from 1001.
+[[env.staging.ratelimits]]
+name = "AUDIENCE_LIMITER"
+namespace_id = "1004"
 
   [env.staging.ratelimits.simple]
   limit = 60

@@ -6,7 +6,7 @@
 //   node manage-keys.mjs issue --client "Acme Co" [--version 2.2] [--domains acme.com,www.acme.com] [--tracking-id G-XXXXXXXXXX]
 //   node manage-keys.mjs revoke <key>
 //   node manage-keys.mjs activate <key>
-//   node manage-keys.mjs update <key> [--client ...] [--version ...] [--domains ...] [--tracking-id ...]
+//   node manage-keys.mjs update <key> [--client ...] [--version ...] [--domains ...] [--tracking-id ...] [--audiences true|false]
 //   node manage-keys.mjs verify <key>
 //   node manage-keys.mjs show <key>
 //   node manage-keys.mjs list
@@ -147,6 +147,22 @@ function checkVersion(raw) {
 // client is actually being served rather than what KV claims.
 const SERVED_TRACKING_ID = /TRACKING_ID_SLOT\s*=\s*'([^']*)'/;
 
+// Whether this client has audiences, which gates the /a/ route on the Worker.
+// Deliberately strict rather than truthy: the only useful default would be "on",
+// and a typo read as consent to serve visitor-level data is the wrong way round
+// to fail. Same argument the consent queue makes for stepping over an
+// unrecognised command.
+const AUDIENCES_ON = ['true', 'on', 'yes', '1'];
+const AUDIENCES_OFF = ['false', 'off', 'no', '0', ''];
+
+function normaliseAudiences(raw) {
+  const value = String(raw === undefined ? '' : raw).trim().toLowerCase();
+  if (AUDIENCES_ON.indexOf(value) !== -1) return true;
+  if (AUDIENCES_OFF.indexOf(value) !== -1) return false;
+  console.error(`Invalid --audiences "${raw}". Expected one of: ${AUDIENCES_ON.concat(AUDIENCES_OFF.filter(Boolean)).join(', ')}.`);
+  process.exit(1);
+}
+
 function normaliseTrackingId(raw) {
   // Upper-cased before checking: GA issues these uppercase and there is no
   // valid lowercase variant to confuse it with, so a lowercased one is a
@@ -250,6 +266,7 @@ function cmdIssue(argv) {
   }
   const trackingId = normaliseTrackingId(flags['tracking-id']);
   if (trackingId) record.trackingId = trackingId;
+  if ('audiences' in flags && normaliseAudiences(flags.audiences)) record.audiences = true;
 
   kvPut(key, record);
 
@@ -297,11 +314,18 @@ async function cmdUpdate(argv) {
   const [key, ...flagArgv] = argv;
   if (!key) { console.error('Usage: update <key> [--client "Acme Co"] [--version 2.2] [--domains a.com,b.com] [--tracking-id G-XXXXXXXXXX]'); process.exit(1); }
 
-  // Flags are parsed and the version checked before the lookup, so a typo fails
-  // at the terminal without a network round trip and without a record sitting
-  // half-updated in memory.
+  // EVERY flag is validated before the lookup, so a typo fails at the terminal
+  // without a network round trip and without a record sitting half-updated in
+  // memory. Each of these exits the process on a bad value, so a validation that
+  // ran after kvGet would already have cost a read and, worse, would abort
+  // partway through applying the rest.
   const flags = parseFlags(flagArgv);
   const version = flags.version ? checkVersion(flags.version) : null;
+  // Present-but-empty (--tracking-id "") clears it, so a wrong ID can be removed
+  // and not just replaced. null therefore means two different things depending on
+  // whether the flag was passed at all, which is why both are read here.
+  const trackingId = 'tracking-id' in flags ? normaliseTrackingId(flags['tracking-id']) : null;
+  const audiences = 'audiences' in flags ? normaliseAudiences(flags.audiences) : null;
 
   const record = kvGet(key);
   if (!record) { console.error('No record found for that key'); process.exit(1); }
@@ -309,12 +333,15 @@ async function cmdUpdate(argv) {
   if (flags.client) record.client = flags.client;
   if (version) record.version = version;
   if (flags.domains) record.domains = flags.domains.split(',').map((d) => d.trim()).filter(Boolean);
-  // Present-but-empty (--tracking-id "") clears it, so a wrong ID can be
-  // removed and not just replaced.
   if ('tracking-id' in flags) {
-    const trackingId = normaliseTrackingId(flags['tracking-id']);
     if (trackingId) record.trackingId = trackingId;
     else delete record.trackingId;
+  }
+  // Absent rather than false when off, so a record carries the flag only when it
+  // means something. The Worker tests for === true, so both read the same.
+  if (audiences !== null) {
+    if (audiences) record.audiences = true;
+    else delete record.audiences;
   }
 
   kvPut(key, record);
@@ -344,7 +371,8 @@ function cmdList() {
     const bits = [
       record.status,
       'v' + (record.version || 'default'),
-      record.trackingId || 'no tracking id'
+      record.trackingId || 'no tracking id',
+      record.audiences === true ? 'audiences' : 'no audiences'
     ];
     console.log(name, '->', `${record.client} (${bits.join(', ')})`);
   }

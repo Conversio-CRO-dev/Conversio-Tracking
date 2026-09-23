@@ -141,6 +141,73 @@ function safeTrackingId(raw, key) {
   return raw;
 }
 
+// Everything between having a key and knowing the client may be served.
+// Shared by both routes, returning the record or a reason rather than a
+// response, because the two answer a refusal differently: one with a JavaScript
+// stub a <script> tag executes harmlessly, the other with JSON a fetch reads.
+async function resolveClient(request, env, key, limiter) {
+  var rateLimit;
+  var record;
+  var hostname;
+
+  // A limiter that is down must not take the tag down with it. Failing open is
+  // the deliberate choice: this caps a scraped key's cost, and an hour of
+  // uncapped requests is a smaller problem than an hour of every client's
+  // tracking being off.
+  if (limiter) {
+    try {
+      rateLimit = await limiter.limit({ key: key });
+    } catch (e) {
+      log('rate_limiter_error', { key: fingerprint(key) });
+      rateLimit = null;
+    }
+
+    if (rateLimit && !rateLimit.success) {
+      log('rate_limited', { key: fingerprint(key) });
+      return { reason: 'rate_limited' };
+    }
+  }
+
+  // Covers KV being unavailable and a record holding malformed JSON, which
+  // arrive the same way: get(..., { type: 'json' }) throws on both. Neither is
+  // a decision about this key, so neither gets the inactive stub's cache.
+  try {
+    record = await env.CLIENT_KEYS.get(key, { type: 'json' });
+  } catch (e) {
+    log('key_lookup_error', { key: fingerprint(key) });
+    return { reason: 'unavailable' };
+  }
+
+  if (!record) {
+    log('unknown_key', { key: fingerprint(key) });
+    return { reason: 'inactive' };
+  }
+
+  // A record that parsed but is not an object at all, which a hand-edited value
+  // can be: a bare string or number would otherwise reach the property reads
+  // below and be treated as a revoked client, logging a client name of undefined
+  // and hiding the real problem.
+  if (typeof record !== 'object') {
+    log('record_malformed', { key: fingerprint(key) });
+    return { reason: 'inactive' };
+  }
+
+  if (record.status !== 'active') {
+    log('revoked_key', { key: fingerprint(key), client: record.client });
+    return { reason: 'inactive' };
+  }
+
+  if (record.domains && record.domains.length) {
+    hostname = hostnameFromRequest(request);
+    if (!domainAllowed(hostname, record.domains)) {
+      log('domain_mismatch', { key: fingerprint(key), client: record.client, hostname: hostname });
+      return { reason: 'inactive' };
+    }
+  }
+
+  return { record: record };
+}
+
 async function serveBundle(request, env, record, key) {
   var version = record.version;
   var assetUrl;
@@ -201,14 +268,164 @@ async function serveBundle(request, env, record, key) {
   });
 }
 
+// --- audiences -----------------------------------------------------------
+// GET /a/<clientKey>/<conversio_id> answers with the audience codes that client
+// has for that visitor. It is the serving plane of v3 (see
+// .claude/v3-architecture.md), and the thing to know about it is that it is NOT
+// on the critical path of anything.
+//
+// The audiences behind it are derived nightly, so they are up to a day old the
+// moment they are written and a real-time lookup buys nothing. The tag fetches
+// this whenever it happens to run, which under GTM is late, and writes the
+// answer to a first-party cookie. The page that uses it is the NEXT one, where
+// the client's experimentation platform reads the cookie at time zero with no
+// lookup at all. So this route has no latency budget worth the name, and a
+// failure here costs a stale cookie rather than a wrong page.
+//
+// It is on this Worker rather than its own so it inherits the per-client key,
+// the domain allow-list, the logging and the discipline that nothing a
+// dependency does can reach a client as HTML.
+var AUDIENCE_PATTERN = /^\/a\/([A-Za-z0-9_-]{16,64})\/([A-Za-z0-9_.-]{1,80})$/;
+
+// Matched separately from the route rather than folded into it, so an id of the
+// wrong shape is logged as one instead of disappearing into the same 404 as a
+// mistyped path. A tag version that changes the id format would otherwise go
+// silently unserved.
+var CONVERSIO_ID_SAFE = /^con_[a-z2-7]{16}\.[0-9]{1,20}$/;
+
+// A code ends up inside a comma-delimited cookie value, so the comma is the
+// character that matters: one inside a code would split into two codes and
+// forge a membership the visitor does not have. Semicolons, quotes, whitespace
+// and control characters are excluded for the same class of reason. A record
+// hand-edited in the Cloudflare dashboard never passed through the CLI, so this
+// side cannot assume any of it was ever checked.
+var AUDIENCE_CODE_SAFE = /^[a-z0-9][a-z0-9_-]{0,31}$/;
+
+// Cookies ride every request to the client's domain, so the payload is capped
+// here rather than trusted to be sensible. Twenty-four short codes is about the
+// 200-byte budget the cookie format is designed around.
+var AUDIENCE_MAX_CODES = 24;
+
+function audienceOriginAllowed(origin, record) {
+  var hostname;
+
+  if (!record || !record.domains || !record.domains.length) return true;
+
+  try {
+    hostname = new URL(origin).hostname;
+  } catch (e) {
+    return false;
+  }
+
+  return domainAllowed(hostname, record.domains);
+}
+
+// A fetch sends Origin where a <script src> does not, so the allow-list is
+// actually enforceable on this route in a way it never was for the bundle.
+// Without one the header echoes whatever asked, which is the same posture the
+// loader takes and rests on the same two unguessable secrets: a client key and
+// a CSPRNG visitor id. A client using audiences should still be given --domains.
+function audienceHeaders(request, record, cacheControl) {
+  var headers = {
+    'content-type': 'application/json; charset=utf-8',
+    'cache-control': cacheControl,
+    'x-content-type-options': 'nosniff',
+    'vary': 'Origin'
+  };
+  var origin = request.headers.get('Origin');
+
+  if (origin && audienceOriginAllowed(origin, record)) {
+    headers['access-control-allow-origin'] = origin;
+  }
+
+  return headers;
+}
+
+function audienceJson(request, record, status, body, cacheControl) {
+  return new Response(JSON.stringify(body), {
+    status: status,
+    headers: audienceHeaders(request, record, cacheControl)
+  });
+}
+
+// private, never public: this is one visitor's data and a shared cache has no
+// story for purging it. The short max-age exists for the degenerate case where
+// the tag cannot write its cookie, blocked cookies or a full store, and would
+// otherwise re-ask on every page view of the session.
+function audienceOk(request, record, payload) {
+  return audienceJson(request, record, 200, payload, 'private, max-age=300');
+}
+
+function audienceError(request, status, code) {
+  return audienceJson(request, null, status, { v: 1, error: code }, 'no-store');
+}
+
+// Everything a hand-edited or half-written record can be, resolved to something
+// the tag can put in a cookie without checking it again.
+//
+// A miss is an answer rather than a failure, and it is the common one: most
+// visitors are in no audience, and most first-time visitors never can be. It
+// comes back as an empty list with the current time, which is what stops the
+// tag re-asking on every page view of a visitor who is in nothing.
+function normaliseAudience(stored) {
+  var codes = [];
+  var ts = null;
+  var i;
+
+  if (stored && typeof stored === 'object') {
+    if (Object.prototype.toString.call(stored.a) === '[object Array]') {
+      for (i = 0; i < stored.a.length && codes.length < AUDIENCE_MAX_CODES; i++) {
+        if (typeof stored.a[i] === 'string' && AUDIENCE_CODE_SAFE.test(stored.a[i])) {
+          codes.push(stored.a[i]);
+        }
+      }
+    }
+    if (typeof stored.ts === 'number' && isFinite(stored.ts) && stored.ts > 0) {
+      ts = Math.floor(stored.ts);
+    }
+  }
+
+  // The stored timestamp is when the audience was COMPUTED, which is the number
+  // that shows a stopped pipeline. Falling back to now is right only for a miss,
+  // where there is no computation to date.
+  return { v: 1, ts: ts === null ? Math.floor(Date.now() / 1000) : ts, a: codes };
+}
+
+async function serveAudience(request, env, record, key, conversioId) {
+  var stored;
+
+  // Opt-in per client, the same way a tracking ID is. Without it every existing
+  // key would answer this route, and answering it at all is a statement that
+  // this client has audiences, which for most of them is not true.
+  if (record.audiences !== true) {
+    log('audiences_not_enabled', { key: fingerprint(key), client: record.client });
+    return audienceError(request, 404, 'not_enabled');
+  }
+
+  if (!env.AUDIENCES) {
+    log('audiences_unbound', { key: fingerprint(key) });
+    return audienceError(request, 503, 'unavailable');
+  }
+
+  // Namespaced by client key, so one client's key cannot read another's
+  // audiences even though both arrive at the same Worker.
+  try {
+    stored = await env.AUDIENCES.get('aud:' + key + ':' + conversioId, { type: 'json' });
+  } catch (e) {
+    log('audience_lookup_error', { key: fingerprint(key) });
+    return audienceError(request, 503, 'unavailable');
+  }
+
+  return audienceOk(request, record, normaliseAudience(stored));
+}
+
 export default {
   async fetch(request, env) {
     var url;
-    var match;
-    var key;
-    var rateLimit;
-    var record;
-    var hostname;
+    var bundleMatch;
+    var audienceMatch;
+    var conversioId;
+    var resolved;
 
     // Every binding this handler touches is guarded individually, and the
     // reason is the failure mode rather than tidiness. An uncaught throw out of
@@ -224,9 +441,10 @@ export default {
       return new Response('Not found', { status: 404 });
     }
 
-    match = url.pathname.match(KEY_PATTERN);
+    bundleMatch = url.pathname.match(KEY_PATTERN);
+    audienceMatch = bundleMatch ? null : url.pathname.match(AUDIENCE_PATTERN);
 
-    if (!match) {
+    if (!bundleMatch && !audienceMatch) {
       return new Response('Not found', { status: 404 });
     }
 
@@ -235,70 +453,46 @@ export default {
     // real key costs neither.
     if (request.method !== 'GET' && request.method !== 'HEAD') {
       log('method_not_allowed', { method: request.method });
-      return methodNotAllowedResponse();
+      return audienceMatch
+        ? audienceError(request, 405, 'method_not_allowed')
+        : methodNotAllowedResponse();
     }
 
-    key = match[1];
+    if (audienceMatch) {
+      conversioId = audienceMatch[2];
 
-    // A limiter that is down must not take the tag down with it. Failing open
-    // is the deliberate choice: this caps a scraped key's cost, and an hour of
-    // uncapped requests is a smaller problem than an hour of every client's
-    // tracking being off.
-    if (env.RATE_LIMITER) {
+      // Checked before the key is looked up, so a malformed id costs no KV read,
+      // and logged rather than 404ing silently: this is how a tag version that
+      // changed the id format would announce itself.
+      if (!CONVERSIO_ID_SAFE.test(conversioId)) {
+        log('audience_id_invalid', { key: fingerprint(audienceMatch[1]) });
+        return audienceError(request, 400, 'bad_id');
+      }
+
+      resolved = await resolveClient(request, env, audienceMatch[1], env.AUDIENCE_LIMITER);
+
+      if (resolved.reason === 'rate_limited') return audienceError(request, 429, 'rate_limited');
+      if (resolved.reason === 'unavailable') return audienceError(request, 503, 'unavailable');
+      if (resolved.reason) return audienceError(request, 404, 'unknown');
+
       try {
-        rateLimit = await env.RATE_LIMITER.limit({ key: key });
+        return await serveAudience(request, env, resolved.record, audienceMatch[1], conversioId);
       } catch (e) {
-        log('rate_limiter_error', { key: fingerprint(key) });
-        rateLimit = null;
-      }
-
-      if (rateLimit && !rateLimit.success) {
-        log('rate_limited', { key: fingerprint(key) });
-        return rateLimitedResponse();
+        log('audience_serve_error', { key: fingerprint(audienceMatch[1]) });
+        return audienceError(request, 503, 'unavailable');
       }
     }
 
-    // Covers KV being unavailable and a record holding malformed JSON, which
-    // arrive the same way: get(..., { type: 'json' }) throws on both. Neither
-    // is a decision about this key, so neither gets the inactive stub's cache.
-    try {
-      record = await env.CLIENT_KEYS.get(key, { type: 'json' });
-    } catch (e) {
-      log('key_lookup_error', { key: fingerprint(key) });
-      return unavailableResponse();
-    }
+    resolved = await resolveClient(request, env, bundleMatch[1], env.RATE_LIMITER);
 
-    if (!record) {
-      log('unknown_key', { key: fingerprint(key) });
-      return emptyScriptResponse();
-    }
-
-    // A record that parsed but is not an object at all, which a hand-edited
-    // value can be: a bare string or number would otherwise reach the property
-    // reads below and be treated as a revoked client, logging a client name of
-    // undefined and hiding the real problem.
-    if (typeof record !== 'object') {
-      log('record_malformed', { key: fingerprint(key) });
-      return emptyScriptResponse();
-    }
-
-    if (record.status !== 'active') {
-      log('revoked_key', { key: fingerprint(key), client: record.client });
-      return emptyScriptResponse();
-    }
-
-    if (record.domains && record.domains.length) {
-      hostname = hostnameFromRequest(request);
-      if (!domainAllowed(hostname, record.domains)) {
-        log('domain_mismatch', { key: fingerprint(key), client: record.client, hostname: hostname });
-        return emptyScriptResponse();
-      }
-    }
+    if (resolved.reason === 'rate_limited') return rateLimitedResponse();
+    if (resolved.reason === 'unavailable') return unavailableResponse();
+    if (resolved.reason) return emptyScriptResponse();
 
     try {
-      return await serveBundle(request, env, record, key);
+      return await serveBundle(request, env, resolved.record, bundleMatch[1]);
     } catch (e) {
-      log('serve_error', { key: fingerprint(key) });
+      log('serve_error', { key: fingerprint(bundleMatch[1]) });
       return unavailableResponse();
     }
   }

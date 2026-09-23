@@ -521,6 +521,105 @@ Things worth knowing:
 
 ---
 
+## Audiences (v3, in progress)
+
+The serving plane of the v3 architecture (see
+[`.claude/v3-architecture.md`](../.claude/v3-architecture.md)). One route on this
+Worker answers what audiences a client has for a given visitor:
+
+```
+GET /a/<clientKey>/<conversio_id>
+```
+
+```json
+{ "v": 1, "ts": 1758585600, "a": ["lapsed", "outerwear"] }
+```
+
+`ts` is when the audience was **computed**, not when it was served. Those diverge
+exactly when the derivation pipeline has stopped, which is the case worth being
+able to see, so it is the number to alert on.
+
+**This route is not on the critical path of anything, and that is by design.**
+Audiences are derived nightly, so they are up to a day old the moment they are
+written and a real-time lookup buys nothing. The tag fetches this whenever it
+happens to run, which under GTM is late, and writes the answer to a first-party
+cookie. The page that uses it is the *next* one, where the client's
+experimentation platform reads the cookie at time zero with no lookup at all. A
+failure here therefore costs a stale cookie rather than a wrong page, and the
+route has no latency budget worth the name.
+
+It also means the request rate is **once per visitor per day**, the tag gating it
+on cookie freshness, rather than once per page view.
+
+### Setting it up
+
+One namespace, once:
+
+```bash
+npx wrangler kv namespace create AUDIENCES
+```
+
+Paste the id into `wrangler.toml` over `REPLACE_ME_AUDIENCES_NAMESPACE_ID`, and do
+the same for staging with `--env staging`. Until then the route answers 503 and
+nothing else changes, so deploying ahead of creating it is safe.
+
+### Turning it on for a client
+
+Opt-in per client, the same way a tracking ID is. Without it the route answers
+404 for that key, because answering at all is a statement that this client has
+audiences, which for most of them is not true.
+
+```bash
+node scripts/manage-keys.mjs update cvo_xxxxxxxxxxxxxxxxxxxxxxxx --audiences true
+```
+
+`--audiences false` turns it off again and removes the flag. `list` shows it
+alongside the version and tracking ID.
+
+**Set `--domains` on any client using audiences.** This route returns data about
+an individual rather than a public measurement ID, and unlike the bundle it can
+actually enforce an allow-list: a `fetch` sends `Origin` where a `<script src>`
+sends only `Referer`. With no allow-list configured the route echoes whatever
+origin asked, which rests entirely on the two unguessable secrets involved, a
+client key and a CSPRNG visitor id.
+
+### What is validated, and why twice
+
+A code ends up inside a comma-delimited cookie value on the client's own domain.
+So the Worker checks every code it serves against `[a-z0-9][a-z0-9_-]{0,31}` and
+caps the list at 24, whatever the stored record says.
+
+The comma is the one that matters: a code containing one would split into two
+inside the cookie and forge a membership the visitor does not have. Semicolons,
+quotes, whitespace and control characters go for the same class of reason, and
+the cap exists because cookies ride every request to the client's domain.
+
+This is the same two-sided arrangement as the tracking ID. A loader job or CLI
+checks a value looks right where someone can still see the error; the Worker
+separately checks it is safe to serve, because a record hand-edited into KV
+through the Cloudflare dashboard never passed through either.
+
+### Failure modes
+
+| Reason logged | Response | Means |
+| --- | --- | --- |
+| `audiences_not_enabled` | 404 | the key is live but has no `--audiences` |
+| `audience_id_invalid` | 400 | the id is not `conversio_id`-shaped; a tag that changed the format would show up here |
+| `audiences_unbound` | 503 | the KV namespace is not bound, i.e. not created yet |
+| `audience_lookup_error` | 503 | the namespace is down |
+| `audience_serve_error` | 503 | anything else, guarded so it cannot escape as a 500 |
+
+Every one of them answers with JSON. Nothing this route depends on can put HTML
+into a response the tag is about to parse, which is the loader's own rule with a
+second reason behind it here: an HTML error page becomes a parse failure inside
+the client's page rather than a readable status.
+
+A miss is **not** in that table. An unknown visitor gets a 200 and an empty list,
+because being in no audience is an answer rather than a failure, and it is the
+common one: most visitors are in nothing, and a first-time visitor has no
+behavioural history to be in anything with. The empty answer is what stops the
+tag asking again on every page view.
+
 ## Shipping a new bundle version
 
 From 2.4.1 on the bundle is built from the GTM copy rather than being a
