@@ -115,7 +115,7 @@ VALUES
 -- GA4 export today only when a visitor triggered a Conversio experience or a
 -- mapped event, since it rides conversio_cro and nothing else. Until it is set
 -- as a user-scoped custom dimension on ordinary hits, any audience derived here
--- covers only people already experimented on. See .claude/v3-architecture.md §6.1.
+-- covers only people already experimented on. See docs/v3-architecture.md §6.1.
 
 
 -- ---------------------------------------------------------------------------

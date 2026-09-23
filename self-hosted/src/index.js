@@ -271,7 +271,7 @@ async function serveBundle(request, env, record, key) {
 // --- audiences -----------------------------------------------------------
 // GET /a/<clientKey>/<conversio_id> answers with the audience codes that client
 // has for that visitor. It is the serving plane of v3 (see
-// .claude/v3-architecture.md), and the thing to know about it is that it is NOT
+// docs/v3-architecture.md), and the thing to know about it is that it is NOT
 // on the critical path of anything.
 //
 // The audiences behind it are derived nightly, so they are up to a day old the

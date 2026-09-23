@@ -1,9 +1,13 @@
 # Conversio v3: audience-driven personalisation
 
 What the optimal implementation looks like, and the architecture to get there.
-Written from the end state backwards. Supersedes `v3-audience-infrastructure.md`,
-which worked forwards from the existing tag and reached the wrong shape by doing
-so.
+Written from the end state backwards.
+
+An earlier assessment worked forwards from the existing tag instead, asking how
+to make a GTM-delivered lookup fast enough to beat first paint. That question has
+no answer (§2.1), so it was discarded rather than patched, along with the tag
+instrumentation built to measure it. Both survive on the `tag-3.1-abandoned`
+branch if the reasoning is ever wanted.
 
 Scope confirmed with Andy, September 2026:
 

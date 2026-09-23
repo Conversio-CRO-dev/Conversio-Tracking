@@ -524,7 +524,7 @@ Things worth knowing:
 ## Audiences (v3, in progress)
 
 The serving plane of the v3 architecture (see
-[`.claude/v3-architecture.md`](../.claude/v3-architecture.md)). One route on this
+[`docs/v3-architecture.md`](../docs/v3-architecture.md)). One route on this
 Worker answers what audiences a client has for a given visitor:
 
 ```
