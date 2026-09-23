@@ -348,6 +348,90 @@ names.
 
 ---
 
+## Audiences (3.0)
+
+3.0 gives the tag one new job: keeping a first-party cookie, `_cvo_aud`, that
+says which audiences the visitor is in.
+
+```
+_cvo_aud = v1.1790164370.,lapsed_90d,high_aov,browsed_outerwear,
+           │  │           │
+           │  │           └─ audience codes, comma-delimited and comma-wrapped
+           │  └───────────── when the audience was COMPUTED, epoch seconds
+           └──────────────── schema version
+```
+
+**The cookie is the product, not the lookup.** The client's experimentation
+platform reads it from the head at time zero, before this tag has executed and
+before the page has painted, and targets on it. Nothing waits for a network
+request, so there is no race to lose.
+
+That works because audiences are derived nightly and are therefore up to a day
+old the moment they are written. Fetching one during the page load would buy
+nothing, so the tag doesn't: it reads the cookie an earlier page view left, and
+refreshes it for the next one.
+
+### The two jobs
+
+**Reading** happens at init, behind the emission gate like everything else that
+touches the visitor. The parsed value goes on `window.conversioAudience` for
+anything else on the page:
+
+```js
+window.conversioAudience  // { ts: 1790164370, audiences: ['lapsed_90d', 'high_aov'] }
+                          // or null
+```
+
+**Refreshing** happens after the load event, and only when the cookie is
+missing, unparseable, from an unknown schema version, or older than twelve
+hours. That makes it roughly one request per visitor per day rather than one per
+page view. It is deferred past load deliberately: nothing on this page needs the
+answer, so taking bandwidth from things that do would be a straight loss.
+
+The request is a plain `XMLHttpRequest` GET with no custom headers, so the
+browser sends it without a CORS preflight. `XMLHttpRequest` rather than `fetch`
+is not about old browsers: `fetch` needs a `Promise`, which this file does not
+use anywhere, and XHR has a real `timeout` property that `fetch` has no
+equivalent of without one.
+
+### What a platform targets on
+
+Match on `,code,` with the delimiters, not on the bare code. That is what the
+leading and trailing commas are for: `,outerwear,` cannot be satisfied by
+`winter-outerwear`, where a bare `outerwear` match would quietly accept it and
+widen the audience without anyone noticing.
+
+### Failure is always the same failure
+
+Every way the refresh can go wrong leaves the existing cookie exactly as it was:
+a non-200, a network error, a timeout, an unparseable body, a payload from a
+future schema, a missing timestamp, or a list that is not a list. A visitor
+keeping yesterday's audience is a much smaller problem than one whose audience is
+replaced by whatever a broken response happened to contain, and a stale audience
+still targets where an absent one does not.
+
+A browser that blocks cookies outright does not break the tag. That page still
+gets its audience on `window.conversioAudience`; it simply does not persist to
+the next page view.
+
+### Consent
+
+The cookie is written only after emission consent, and **a withdrawal deletes
+it**. That is new: the gate closing has always stopped new data, but nothing in
+this tag previously removed what was already stored, and a cookie describing the
+person plainly needs it.
+
+The client's platform reading that cookie earlier in the page, before consent has
+resolved on this load, is their processing under their own framework. It is not
+something this tag can police, and the two frameworks need to agree.
+
+### Turning it on
+
+Nothing happens for a client whose loader record does not have `--audiences
+true`: the endpoint slot is substituted empty and the tag makes no request at
+all. See [the self-hosted README](self-hosted/README.md#audiences-v3-in-progress)
+for the route, the KV namespace and the CLI that loads the data.
+
 ## Testing
 
 `test/` contains a Node-based test suite that loads the actual tag source
@@ -360,21 +444,21 @@ installs are required, only Node itself.
 Run the suite for the current version with:
 
 ```bash
-node test/runtime-tag-2.6.3.test.js
+node test/runtime-tag-3.0.test.js
 ```
 
-This runs the same set of checks against both shipped copies of the 2.6.3 tag,
-the GTM dev file (`conversio_runtime_tag_v2.6.3.js`) and the self-hosted bundle
-(`self-hosted/public/runtime-tag.2.6.3.js`), so the two can't silently diverge.
+This runs the same set of checks against both shipped copies of the 3.0 tag,
+the GTM dev file (`conversio_runtime_tag_v3.0.js`) and the self-hosted bundle
+(`self-hosted/public/runtime-tag.3.0.js`), so the two can't silently diverge.
 Since 2.4.1 the bundle is the comment-stripped build rather than a copy, which
 means the suite is verifying the exact bytes clients receive. A passing run looks
 like:
 
 ```
-conversio_runtime_tag_v2.6.3.js: 498 passed, 0 failed
-self-hosted/public/runtime-tag.2.6.3.js: 498 passed, 0 failed
+conversio_runtime_tag_v3.0.js: 556 passed, 0 failed
+self-hosted/public/runtime-tag.3.0.js: 556 passed, 0 failed
 
-TOTAL: 996 passed, 0 failed
+TOTAL: 1112 passed, 0 failed
 ```
 
 There's a second suite for the self-hosted loader Worker, which runs it against
@@ -387,13 +471,53 @@ node test/loader.test.js
 ```
 
 Both exit non-zero if anything fails, so they're safe to wire into CI. Earlier
-versions keep their own suites (`test/runtime-tag-2.6.2.test.js`,
+versions keep their own suites (`test/runtime-tag-2.6.3.test.js`,
+`test/runtime-tag-2.6.2.test.js`,
 `test/runtime-tag-2.6.1.test.js`,
 `test/runtime-tag-2.6.test.js`,
 `test/runtime-tag-2.5.1.test.js`, `test/runtime-tag-2.5.test.js`,
 `test/runtime-tag-2.4.2.test.js`, `test/runtime-tag-2.4.1.test.js`,
 `test/runtime-tag-2.4.test.js`, `test/runtime-tag-2.3.test.js`), which still pass
 and are worth keeping green while any client is pinned to those bundles.
+
+### What it covers (3.0)
+
+Everything in 2.6.3 below, plus section 30: the `_cvo_aud` audience cookie. 3.0
+is additive, so sections 1 to 29 are the other half of the check and none of them
+may move.
+
+Reading first, since that is what makes an audience available at time zero. A
+cookie already on the visitor is parsed and exposed with the `computed_at` it
+carried, and no request is made for a fresh one. Five kinds of unusable value are
+treated as absent rather than repaired: a truncated value, one from a future
+schema, a non-numeric timestamp, something else entirely under the same name, and
+an empty string. Codes failing the pattern are dropped on the way in as well as
+on the way out.
+
+Then when it refreshes and when it does not: not at all without an endpoint, not
+for a fresh cookie, yes for a stale or missing one, at the endpoint the loader
+patched in with the id appended, as a plain GET with a timeout set. And that the
+request is deferred rather than made during init, which is the check that would
+fail if it ever started competing with the page's own resources.
+
+Then the cookie it writes: the format, the delimiter wrapping, `Path`,
+`Max-Age`, `SameSite`, `Secure` on https and deliberately not on http. That a
+code containing a comma never reaches it, since one inside the value would split
+into two and hand the visitor a membership they do not have. That the list is
+capped whatever arrives. And that a visitor in no audience still gets a cookie,
+which is what stops them being asked again on every page view.
+
+Then eight failure modes, each of which must leave the existing cookie exactly as
+it was, and each of which must still leave the tag initialised: a 500, a 404, a
+network error, a timeout, an unparseable body, a future schema version, a missing
+timestamp, and a list that is not a list. That last one found a real bug, the
+code having disagreed with its own comment by turning a malformed list into an
+empty one and so replacing a good audience with no audience.
+
+Then a browser blocking cookies outright, where the page still gets its audience
+and only the persistence is lost. Then withdrawal, which deletes the cookie by
+expiring it rather than blanking it. Section 12's globals allow-list gained
+`conversioAudience`; that it caught the addition is the point of having one.
 
 ### What it covers (2.6.3)
 

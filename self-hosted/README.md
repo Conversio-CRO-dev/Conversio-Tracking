@@ -551,6 +551,27 @@ route has no latency budget worth the name.
 It also means the request rate is **once per visitor per day**, the tag gating it
 on cookie freshness, rather than once per page view.
 
+### What the tag gets
+
+The Worker patches a second value into the bundle at serve time, beside the
+tracking ID: the audience endpoint for that client.
+
+```
+@@CONVERSIO_AUDIENCE_ENDPOINT@@  ->  https://tag.conversio.dev/a/cvo_xxxxx.../
+```
+
+It is **built rather than copied**, from the request's own origin plus the key
+already matched by the route. So a bundle served from staging points at staging
+and one served from production points at production, with nothing to keep in sync
+and no way to get them crossed. The result is checked against a strict pattern
+before being spliced, for the same reason the tracking ID is: it lands inside a JS
+string literal that then runs on every page of the client's site.
+
+A client without `--audiences true` gets an empty slot, so the tag makes no
+request at all. Until that flag is set, all of this is inert rather than merely
+unused. See [Audiences (3.0)](../README.md#audiences-30) for what the tag does
+with it.
+
 ### Setting it up
 
 One namespace, once:

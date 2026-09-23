@@ -17,7 +17,7 @@ var runTag = require('./harness').runTag;
 var PUBLIC_DIR = path.join(__dirname, '..', 'self-hosted', 'public');
 // Only a label for stack traces; the source actually run is the Worker's output.
 var SERVED_LABEL = 'served-by-loader.js';
-var BUNDLE_VERSION = '2.6.2';
+var BUNDLE_VERSION = '3.0';
 var ORIGIN = 'https://tag.conversio.dev';
 var KEY = 'cvo_0123456789abcdefghij';
 
@@ -102,6 +102,51 @@ async function main() {
   check('no tracking ID: tag reads null',
     noneRun.window.conversioSettings.trackingId === null,
     JSON.stringify(noneRun.window.conversioSettings));
+
+  // 2b. the audience endpoint, which is the second thing patched at serve time
+  //     and, unlike the tracking ID, is built rather than copied: the request's
+  //     own origin plus the client's own key.
+  var audRes = await get(loader, activeRecord({ audiences: true }));
+  var audBody = await audRes.text();
+  check('audiences on: placeholder substituted',
+    audBody.indexOf('@@CONVERSIO_AUDIENCE_ENDPOINT@@') === -1, 'placeholder still present');
+  check('audiences on: the endpoint is this origin and this key',
+    audBody.indexOf(ORIGIN + '/a/' + KEY + '/') !== -1,
+    'expected ' + ORIGIN + '/a/' + KEY + '/');
+
+  // The origin comes from the request rather than a constant, so a bundle served
+  // from staging points at staging with nothing to keep in sync.
+  var stgRes = await loader.fetch(
+    new Request('https://staging.example/t/' + KEY + '.js'),
+    makeEnv(activeRecord({ audiences: true })));
+  var stgBody = await stgRes.text();
+  check('the endpoint follows the host the bundle was served from',
+    stgBody.indexOf('https://staging.example/a/' + KEY + '/') !== -1,
+    'staging endpoint not found');
+  check('and carries no trace of the other origin',
+    stgBody.indexOf(ORIGIN + '/a/') === -1);
+
+  // A client without audiences gets an empty slot, so the tag makes no request
+  // at all. Enabling the feature is one command, and until it is run this is
+  // inert rather than merely unused.
+  check('audiences off: placeholder still substituted',
+    noneBody.indexOf('@@CONVERSIO_AUDIENCE_ENDPOINT@@') === -1, 'placeholder still present');
+  check('audiences off: no endpoint is present in the served bytes',
+    noneBody.indexOf('/a/' + KEY + '/') === -1, 'an endpoint leaked into a client without audiences');
+
+  var audRun = runTag({ tagPath: SERVED_LABEL, tagSource: audBody, cwv: 'ok', emissionEnabled: true,
+    xhr: { body: { v: 1, ts: 1790164370, a: ['lapsed_90d'] } } });
+  check('the tag served to an audience client looks the endpoint up',
+    audRun.xhrRequests.length === 1 &&
+    audRun.xhrRequests[0].url.indexOf(ORIGIN + '/a/' + KEY + '/con_') === 0,
+    JSON.stringify(audRun.xhrRequests));
+  check('and writes the cookie from what it got back',
+    audRun.cookies._cvo_aud === 'v1.1790164370.,lapsed_90d,', audRun.cookies._cvo_aud);
+
+  var offRun = runTag({ tagPath: SERVED_LABEL, tagSource: noneBody, cwv: 'ok', emissionEnabled: true,
+    xhr: { body: { v: 1, ts: 1790164370, a: ['lapsed_90d'] } } });
+  check('a client without audiences makes no request whatever the network would say',
+    offRun.xhrRequests.length === 0);
 
   // 3. the security boundary: a record edited straight into KV never passed
   //    through the CLI's validation, and this value lands inside a JS string

@@ -46,6 +46,42 @@ var TRACKING_ID_SLOT = '@@CONVERSIO_TRACKING_ID@@';
 // value was ever validated. Anything failing it is dropped, not injected.
 var TRACKING_ID_SAFE = /^[A-Za-z0-9_-]{1,64}$/;
 
+// The slot the tag reads its audience endpoint from. Must stay in step with
+// AUDIENCE_ENDPOINT_SLOT in the runtime tag.
+//
+// Built from the request's own origin rather than a constant, so the bundle
+// staging serves points at staging and the one production serves points at
+// production, with nothing to keep in sync and no way to get it crossed.
+var AUDIENCE_ENDPOINT_SLOT = '@@CONVERSIO_AUDIENCE_ENDPOINT@@';
+
+// Checked rather than trusted, for the same reason the tracking ID is: this is
+// spliced into a JS string literal that then runs on every page of the client's
+// site. The key half is already known good, having matched KEY_PATTERN, but the
+// origin comes from the Host header and this is the cheapest place to be sure of
+// it.
+var AUDIENCE_ENDPOINT_SAFE = /^https:\/\/[A-Za-z0-9.-]{1,255}\/a\/[A-Za-z0-9_-]{16,64}\/$/;
+
+function audienceEndpoint(request, record, key) {
+  var url;
+
+  // Not enabled for this client, so the tag reads an empty slot and does no
+  // refresh at all. It still reads whatever cookie the visitor already carries.
+  if (record.audiences !== true) return '';
+
+  try {
+    url = new URL('/a/' + key + '/', request.url).toString();
+  } catch (e) {
+    return '';
+  }
+
+  if (!AUDIENCE_ENDPOINT_SAFE.test(url)) {
+    log('audience_endpoint_rejected', { key: fingerprint(key) });
+    return '';
+  }
+
+  return url;
+}
+
 // A client key is the bearer credential that gates the bundle, so the whole of
 // it does not belong in a log store with its own access model and its own
 // retention. Truncation rather than a hash, because a hash would have to be
@@ -257,6 +293,7 @@ async function serveBundle(request, env, record, key) {
   // ever served the raw placeholder. An empty slot reads as "not configured"
   // in the tag. Bundles predating the slot simply contain nothing to replace.
   body = body.split(TRACKING_ID_SLOT).join(safeTrackingId(record.trackingId, key));
+  body = body.split(AUDIENCE_ENDPOINT_SLOT).join(audienceEndpoint(request, record, key));
 
   return new Response(body, {
     status: 200,

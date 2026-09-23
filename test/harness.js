@@ -68,6 +68,19 @@ var VITALS_FIXTURE = [
 //     a browser offering no high-resolution clock at all is simulated (the tag
 //     falls back to Date.now()); Core Web Vitals collection is unaffected
 //     either way, since it reads performance entries rather than the clock.
+//   cookies: seed object for document.cookie, {name: value}
+//   cookiesThrow: document.cookie throws on read and write, as it does in a
+//     sandboxed iframe and where cookies are blocked outright
+//   protocol: what window.location.protocol reads, 'https:' by default. The
+//     tag only marks a cookie Secure on https, so 'http:' exercises the other
+//     branch.
+//   xhr: what the stubbed XMLHttpRequest answers with. { status, body, delay }
+//     for a response, { networkError: true } or { timeoutError: true } for the
+//     two failure callbacks. body may be a string or an object, which is
+//     stringified. Responses arrive through the timer queue, so a test drives
+//     them with drain() as it does everything else. Unset means networkError,
+//     so a test that did not think about the network cannot accidentally get a
+//     cookie written.
 //   localStorage: store or false (absent) or {throwOnRead/throwOnWrite}
 //   emissionEnabled: bool
 //   sessionInitial: seed object for sessionStorage
@@ -234,10 +247,55 @@ function runTag(opts) {
       .map(function (a) { return { command: a[0], name: a[1], params: a[2] }; });
   }
 
+  // A cookie jar behind the accessor document.cookie really is: reading gives
+  // every cookie joined, writing sets or deletes exactly one. cookieWrites keeps
+  // the raw strings so a test can assert on the attributes as well as the value.
+  var cookieJar = Object.assign({}, opts.cookies || {});
+  var cookieWrites = [];
+
   sandbox.window = window;
   sandbox.document = {
     readyState: opts.readyState || 'complete',
     visibilityState: opts.visibilityState || 'visible'
+  };
+
+  Object.defineProperty(sandbox.document, 'cookie', {
+    get: function () {
+      if (opts.cookiesThrow) throw new Error('cookies blocked');
+      return Object.keys(cookieJar).map(function (k) { return k + '=' + cookieJar[k]; }).join('; ');
+    },
+    set: function (raw) {
+      if (opts.cookiesThrow) throw new Error('cookies blocked');
+      cookieWrites.push(String(raw));
+      var head = String(raw).split(';')[0].split('=');
+      var name = head[0].replace(/^\s+|\s+$/g, '');
+      var maxAge = /Max-Age=(-?\d+)/i.exec(String(raw));
+      if (maxAge && Number(maxAge[1]) <= 0) delete cookieJar[name];
+      else cookieJar[name] = head.slice(1).join('=');
+    }
+  });
+
+  window.location = { protocol: opts.protocol || 'https:' };
+
+  // Answers through the timer queue rather than synchronously, as a real one
+  // does, so a test that has not drained sees the request in flight.
+  var xhrRequests = [];
+  window.XMLHttpRequest = function () { this.status = 0; this.responseText = ''; };
+  window.XMLHttpRequest.prototype.open = function (method, url) {
+    this._method = method;
+    this._url = url;
+  };
+  window.XMLHttpRequest.prototype.send = function () {
+    var self = this;
+    var r = opts.xhr || { networkError: true };
+    xhrRequests.push({ method: this._method, url: this._url, timeout: this.timeout });
+    timers.push({ due: clock + (r.delay || 0), seq: timerSeq++, fn: function () {
+      if (r.networkError) { if (self.onerror) self.onerror(); return; }
+      if (r.timeoutError) { if (self.ontimeout) self.ontimeout(); return; }
+      self.status = (typeof r.status === 'number') ? r.status : 200;
+      self.responseText = (typeof r.body === 'string') ? r.body : JSON.stringify(r.body || {});
+      if (self.onload) self.onload();
+    } });
   };
   sandbox.setTimeout = window.setTimeout;
   window.window = window;
@@ -319,6 +377,9 @@ function runTag(opts) {
   if (opts.autoDrain !== false) drain();
 
   return {
+    cookies: cookieJar,
+    cookieWrites: cookieWrites,
+    xhrRequests: xhrRequests,
     dataLayer: dataLayer,
     session: sessionStore._data,
     local: localStore ? localStore._data : null,
