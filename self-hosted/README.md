@@ -781,6 +781,25 @@ Set `--domains` at the same time if it is not already set. This route returns
 data about an individual rather than a public measurement ID, and it is the one
 route where the allow-list is actually enforceable.
 
+**Then check, on that client's site, that only one Conversio tag is running:**
+
+```js
+window.conversioSettings   // { version: '3.0', trackingId: 'G-...' }
+```
+
+`blockedVersions` must be absent. If it is there, two copies of the tag are on
+the page and only one of them did anything. This is not hypothetical: it
+happened on conversio.com during the staging trial, where an existing 2.6.3 tag
+won the race and the 3.0 one stood down in silence, which looked exactly like 3.0
+being broken.
+
+A client migrating to a new version is the likeliest place to hit it, because
+that is when an old pasted-inline tag and a new loader-served one are most likely
+to be on the page together. **Remove the old tag in the same container version
+that adds the new one**, rather than in a follow-up: two published versions means
+a window where both are live, and in that window the one that wins the race is
+whichever the browser happens to execute first.
+
 ### Failure modes
 
 | Reason logged | Response | Means |
