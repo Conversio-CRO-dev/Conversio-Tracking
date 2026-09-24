@@ -7,7 +7,7 @@
 // docs/v3-architecture.md and bigquery/audience_membership.sql.
 //
 // Usage:
-//   node manage-audiences.mjs load <clientKey> --file rows.json [--dry-run] [--skip-invalid] [--force]
+//   node manage-audiences.mjs load <clientKey> --file rows.json [--dry-run] [--skip-invalid] [--force] [--ttl seconds|none]
 //   node manage-audiences.mjs show <clientKey> <conversioId>
 //   node manage-audiences.mjs list <clientKey> [--limit 20]
 //   node manage-audiences.mjs delete <clientKey> <conversioId>
@@ -44,6 +44,26 @@ const MAX_CODES = 24;
 // wrangler's bulk endpoint takes 10,000 pairs; 5,000 leaves room for long keys
 // without anyone having to think about the payload ceiling.
 const CHUNK = 5000;
+
+// Every record expires unless told otherwise, and the store cleaning itself is
+// the point rather than a saving.
+//
+// A visitor who stops being in any audience is handled by the nightly diff
+// emitting them with an empty list. A visitor who stops visiting is not: nothing
+// emits a row for someone the derivation no longer sees, so without an expiry
+// their record sits in KV being wrong for as long as the namespace exists.
+//
+// Sixty days against a thirty-day cookie. A visitor returning between the two
+// has no cookie, is looked up, and is served the record that is still there. One
+// returning after both has neither, which for someone gone two months is the
+// right answer. The gap is deliberately wide in the other direction too: a
+// pipeline that stops does not start deleting audiences until it has been broken
+// for two months, which keeps "stale beats absent" true for any outage anyone
+// would actually have.
+const DEFAULT_TTL_SECONDS = 5184000;
+
+// Cloudflare's floor. Below it the API rejects the write rather than rounding.
+const MIN_TTL_SECONDS = 60;
 
 function extractEnv(argv) {
   const i = argv.indexOf('--env');
@@ -207,9 +227,11 @@ function cmdLoad(argv) {
   const clientKey = requireClientKey(positional[0]);
 
   if (!flags.file || flags.file === true) {
-    console.error('Usage: load <clientKey> --file rows.json [--dry-run] [--skip-invalid] [--force]');
+    console.error('Usage: load <clientKey> --file rows.json [--dry-run] [--skip-invalid] [--force] [--ttl seconds|none]');
     process.exit(1);
   }
+
+  const ttl = 'ttl' in flags ? checkTtl(flags.ttl) : DEFAULT_TTL_SECONDS;
 
   let rows;
   try {
@@ -246,6 +268,9 @@ function cmdLoad(argv) {
       console.log(`  ${audienceKey(clientKey, r.conversio_id)} = ${JSON.stringify(r.value)}`);
     });
     if (ok.length > 5) console.log(`  ... and ${ok.length - 5} more`);
+    console.log(ttl === null
+      ? '  expiry: none, these records will outlive the visitors'
+      : `  expiry: ${ttl}s (${Math.round(ttl / 86400)} days) from the write`);
     return;
   }
 
@@ -268,17 +293,33 @@ function cmdLoad(argv) {
 
   let written = 0;
   for (let i = 0; i < ok.length; i += CHUNK) {
-    const chunk = ok.slice(i, i + CHUNK).map((r) => ({
-      key: audienceKey(clientKey, r.conversio_id),
-      value: JSON.stringify(r.value)
-    }));
+    const chunk = ok.slice(i, i + CHUNK).map((r) => {
+      const pair = {
+        key: audienceKey(clientKey, r.conversio_id),
+        value: JSON.stringify(r.value)
+      };
+      if (ttl !== null) pair.expiration_ttl = ttl;
+      return pair;
+    });
     bulkPut(chunk);
     written += chunk.length;
     if (ok.length > CHUNK) console.log(`  ${written}/${ok.length}`);
   }
 
-  console.log(`\nWrote ${written} audience record(s) for ${record.client}.`);
+  console.log(`\nWrote ${written} audience record(s) for ${record.client}` +
+    (ttl === null ? ', with no expiry.' : `, expiring in ${Math.round(ttl / 86400)} days.`));
   console.log(`Check one with:\n  node scripts/manage-audiences.mjs show ${clientKey} ${ok[0].conversio_id}`);
+}
+
+function checkTtl(raw) {
+  if (raw === 'none' || raw === '0') return null;
+
+  const value = Number(raw);
+  if (!Number.isFinite(value) || Math.floor(value) !== value || value < MIN_TTL_SECONDS) {
+    console.error(`Invalid --ttl "${raw}". Expected whole seconds, at least ${MIN_TTL_SECONDS}, or "none".`);
+    process.exit(1);
+  }
+  return value;
 }
 
 function bulkPut(pairs) {
