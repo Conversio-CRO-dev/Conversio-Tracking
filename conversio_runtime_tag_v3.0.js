@@ -991,11 +991,18 @@
   // which is the whole point: the client's experimentation platform reads it
   // from the head at time zero, long before this tag has executed.
   //
-  // WRITE: a refresh, scheduled after load, for the NEXT page view. Audiences
-  // are derived nightly, so they are up to a day old the moment they are
-  // written and fetching one during this page load would buy nothing. Late is
-  // therefore not a compromise here, it is correct, and the refresh is deferred
-  // past the load event so it competes with none of the page's own resources.
+  // WRITE: a refresh, scheduled after load, and it is only about CHANGES in
+  // membership. Whatever the visitor already had is exposed during init above
+  // and has been in the cookie since time zero, so a returning visitor is
+  // targetable on THIS page load. What waits for the next one is an audience the
+  // nightly job has only just moved them into: that arrives when this refresh
+  // lands, by which point anything in the head has already read the cookie.
+  //
+  // Audiences are derived nightly, so they are up to a day old the moment they
+  // are written and fetching one during this page load would buy nothing. Late
+  // is therefore not a compromise here, it is correct, and the refresh is
+  // deferred past the load event so it competes with none of the page's own
+  // resources.
   //
   // Nothing on this page waits for the fetch, so its failure costs a cookie that
   // stays as it was. A stale audience still targets; an absent one does not.

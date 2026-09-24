@@ -369,7 +369,19 @@ request, so there is no race to lose.
 That works because audiences are derived nightly and are therefore up to a day
 old the moment they are written. Fetching one during the page load would buy
 nothing, so the tag doesn't: it reads the cookie an earlier page view left, and
-refreshes it for the next one.
+refreshes it in the background.
+
+**A returning visitor is targetable on the page load they arrive on**, not the
+one after. Their cookie is already on the browser when the request goes out, so
+the platform reads it in the head before paint, and `window.conversioAudience` is
+populated during tag init. Neither waits for anything.
+
+The only thing that waits for the next page view is a **change** in membership.
+If the nightly job has just moved someone into a new audience, that code reaches
+the browser when the refresh lands, which is after the head has already read the
+cookie. So they carry yesterday's audience for one more page view, and are never
+without one. A first-ever visitor has no cookie and no behavioural history, so
+there is nothing to be late with.
 
 ### The two jobs
 

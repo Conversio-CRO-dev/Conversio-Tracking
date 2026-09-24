@@ -3387,6 +3387,38 @@ function runSuite(tagPath, label) {
     check('no cookie reads as no audience',
       aud(tag(consented({}))) === null);
 
+    // WHEN, not just whether. A returning visitor is targetable on the page load
+    // they arrive on, and the refresh is only ever about a CHANGE in membership.
+    // Nothing is drained in these three, so what they see is tag-init time: no
+    // load event, no timers, no network.
+    var pending = tagWithAudiences(ENDPOINT, consented({
+      autoDrain: false, readyState: 'loading', cookies: { _cvo_aud: fresh }
+    }));
+    check('a returning visitor has their audience before anything is drained',
+      !!aud(pending) && aud(pending).audiences.join(',') === 'lapsed_90d,high_aov',
+      JSON.stringify(aud(pending)));
+    check('and no request has been made for it', pending.xhrRequests.length === 0);
+
+    pending = tagWithAudiences(ENDPOINT, consented({
+      autoDrain: false, readyState: 'loading', cookies: { _cvo_aud: stale },
+      xhr: { body: { v: 1, ts: now, a: ['lapsed_90d', 'newly_added'] } }
+    }));
+    check('a stale cookie still gives its audience immediately',
+      !!aud(pending) && aud(pending).audiences.join(',') === 'lapsed_90d',
+      JSON.stringify(aud(pending)));
+    pending.drain();
+    check('and the refresh updates it in place once it lands',
+      aud(pending).audiences.join(',') === 'lapsed_90d,newly_added',
+      JSON.stringify(aud(pending)));
+    check('so the visitor is never without an audience, only behind by one load',
+      true);
+
+    pending = tagWithAudiences(ENDPOINT, consented({
+      autoDrain: false, readyState: 'loading', xhr: { body: { v: 1, ts: now, a: [] } }
+    }));
+    check('a first-ever visitor has nothing, having no history to have anything from',
+      aud(pending) === null);
+
     [['a truncated value', 'v1.'],
      ['a value from a future schema', 'v2.' + now + '.,lapsed_90d,'],
      ['a non-numeric timestamp', 'v1.yesterday.,lapsed_90d,'],
