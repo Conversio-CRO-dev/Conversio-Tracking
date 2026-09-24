@@ -205,6 +205,14 @@ function build(version) {
   if (lines[1].indexOf(`version ${version}`) === -1) fail(`header does not say version ${version}: ${lines[1]}`);
   if (lines[2].indexOf('Copyright') === -1) fail(`line 3 is not the copyright notice: ${lines[2]}`);
 
+  // The tag reports its own version on window.conversioSettings.version, from a
+  // constant rather than by parsing its header, and a marker that disagrees with
+  // the bundle it is in would be worse than no marker at all: it is read at
+  // exactly the moment someone has stopped trusting what they can see.
+  if (source.indexOf(`var TAG_VERSION = '${version}';`) === -1) {
+    fail(`TAG_VERSION does not say '${version}'. The header and the constant must agree.`);
+  }
+
   // Lines 2 and 3 of the GTM file: the version header, with the client slot
   // relabelled, and the copyright notice. The only comments the bundle keeps.
   const header = [lines[1].replace(HEADER_FROM, HEADER_TO), lines[2]];

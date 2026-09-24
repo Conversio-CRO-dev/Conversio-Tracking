@@ -3,8 +3,22 @@
 (function () {
   'use strict';
 
+  var TAG_VERSION = '3.0';
+
   var INIT_KEY = '__CONVERSIO_RUNTIME_INIT__';
-  if (window[INIT_KEY]) return;
+
+  if (window[INIT_KEY]) {
+    try {
+      if (!isObject(window.conversioSettings)) window.conversioSettings = {};
+      if (!isArray(window.conversioSettings.blockedVersions)) {
+        window.conversioSettings.blockedVersions = [];
+      }
+      window.conversioSettings.blockedVersions.push(TAG_VERSION);
+    } catch (e) {
+    }
+    return;
+  }
+
   window[INIT_KEY] = true;
 
   var KEY_DATA_PENDING          = 'conversioVitalsPending';
@@ -166,6 +180,7 @@
       settings = window.conversioSettings;
       if (!isObject(settings)) settings = window.conversioSettings = {};
       settings.trackingId = readTrackingId();
+      settings.version = TAG_VERSION;
     } catch (e) {
     }
   }

@@ -4,9 +4,32 @@
 (function () {
   'use strict';
 
+  // Which bundle this is. Kept in step with the header above by
+  // build-bundle.mjs, which refuses to build a bundle whose constant and header
+  // disagree, since a version marker that lies is worse than none.
+  var TAG_VERSION = '3.0';
+
   // Prevent double initialisation
   var INIT_KEY = '__CONVERSIO_RUNTIME_INIT__';
-  if (window[INIT_KEY]) return;
+
+  if (window[INIT_KEY]) {
+    // A second copy of this tag on the page does nothing, which is correct and
+    // was until now completely silent. Two versions side by side is a normal
+    // state while testing one against another, and "which of them actually
+    // initialised" then has no answer anywhere on the page. So the copy that
+    // stood down records that it did.
+    try {
+      if (!isObject(window.conversioSettings)) window.conversioSettings = {};
+      if (!isArray(window.conversioSettings.blockedVersions)) {
+        window.conversioSettings.blockedVersions = [];
+      }
+      window.conversioSettings.blockedVersions.push(TAG_VERSION);
+    } catch (e) {
+      // a frozen or hostile window.conversioSettings is not worth failing over
+    }
+    return;
+  }
+
   window[INIT_KEY] = true;
 
   // Storage keys for the once-per-page-load data event (sessionStorage). Every
@@ -282,6 +305,12 @@
       // Assigned rather than replacing the object, so a later tag that has
       // already put its own keys there keeps them.
       settings.trackingId = readTrackingId();
+      // Not behind the consent gate, for the same reason the tracking ID is not:
+      // it says nothing about the person browsing. It is the first thing to ask
+      // for on a page where the tag is not doing what a version's notes say it
+      // should, and it answers for the pasted-inline copy too, the value being a
+      // constant in the file rather than something the loader substitutes.
+      settings.version = TAG_VERSION;
     } catch (e) {
       // A frozen or otherwise hostile window.conversioSettings must not take
       // the rest of the tag down with it.

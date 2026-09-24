@@ -348,6 +348,46 @@ names.
 
 ---
 
+## Which version is running (3.0)
+
+```js
+window.conversioSettings.version        // '3.0'
+window.conversioSettings.blockedVersions // ['3.0'] if a second copy stood down
+```
+
+The first is the first thing to ask on a page where the tag is not doing what a
+version's notes say it should. It comes from a constant in the file rather than
+anything the loader substitutes, so it answers for the pasted-inline copy too,
+and `build-bundle.mjs` refuses to build a bundle whose constant and header
+disagree. A version marker that lies is worse than none, being read at exactly
+the moment someone has stopped trusting what they can see.
+
+The second exists because of a real morning lost to it. **Two Conversio tags on
+one page is a normal state while one version is being tested against another**,
+and the double-init guard means the second does nothing at all:
+
+```js
+var INIT_KEY = '__CONVERSIO_RUNTIME_INIT__';
+if (window[INIT_KEY]) return;
+```
+
+That is correct and must stay. What it lacked was any trace: whichever copy lost
+the race left nothing on the page to say it had been there, so a 3.0 tag standing
+down behind a 2.6.3 one looked exactly like 3.0 being broken. The copy that
+stands down now appends its version to `blockedVersions`.
+
+So the three states read like this:
+
+| What you see | What happened |
+| --- | --- |
+| `version: '3.0'`, no `blockedVersions` | one tag, and it is 3.0 |
+| `version: '3.0'`, `blockedVersions: ['3.0']` | two copies of 3.0; the first won |
+| `version: undefined`, `blockedVersions: ['3.0']` | an older bundle won the race and 3.0 did nothing. Nothing 3.0 adds will work, including the audience cookie |
+
+The third is the one to recognise. Pause the other tag rather than trying to win
+the race by loading earlier: the race is real, so a test that wins it once tells
+you nothing about the next load.
+
 ## Audiences (3.0)
 
 3.0 gives the tag one new job: keeping a first-party cookie, `_cvo_aud`, that
@@ -467,10 +507,10 @@ means the suite is verifying the exact bytes clients receive. A passing run look
 like:
 
 ```
-conversio_runtime_tag_v3.0.js: 556 passed, 0 failed
-self-hosted/public/runtime-tag.3.0.js: 556 passed, 0 failed
+conversio_runtime_tag_v3.0.js: 570 passed, 0 failed
+self-hosted/public/runtime-tag.3.0.js: 570 passed, 0 failed
 
-TOTAL: 1112 passed, 0 failed
+TOTAL: 1140 passed, 0 failed
 ```
 
 There's a second suite for the self-hosted loader Worker, which runs it against

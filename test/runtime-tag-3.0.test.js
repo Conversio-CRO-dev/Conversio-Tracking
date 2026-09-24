@@ -3555,6 +3555,54 @@ function runSuite(tagPath, label) {
       JSON.stringify(dataEvents(r.dataLayer)[0].conversio));
   })();
 
+  // 31. The version marker
+  //
+  // Added after two tags on one page produced a silent no-op that nothing on
+  // the page could explain. The double-init guard is correct and always was:
+  // the second copy must do nothing. What it lacked was any way to find out
+  // that it had happened, at the one moment someone has stopped trusting what
+  // they can see.
+  (function () {
+    var OLD = fs.readFileSync(path.join(__dirname, '..', 'conversio_runtime_tag_v2.6.3.js'), 'utf8');
+
+    check('the tag reports which bundle it is',
+      tag(consented({})).window.conversioSettings.version === '3.0',
+      JSON.stringify(tag(consented({})).window.conversioSettings));
+
+    // Same reasoning as the tracking ID: it says nothing about the person, and
+    // an unconsented page is exactly where someone may be asking what is running.
+    check('and reports it without consent',
+      tag({}).window.conversioSettings.version === '3.0');
+
+    // Two copies of this version: the second stands down and says so.
+    var twice = tag(consented({ alsoRun: fs.readFileSync(tagPath, 'utf8') }));
+    check('a second copy records that it was blocked',
+      JSON.stringify(twice.window.conversioSettings.blockedVersions) === '["3.0"]',
+      JSON.stringify(twice.window.conversioSettings));
+    check('while the copy that won still reports itself',
+      twice.window.conversioSettings.version === '3.0');
+    check('and the guard still guards: one conversio_data, not two',
+      dataEvents(twice.dataLayer).length === 1, String(dataEvents(twice.dataLayer).length));
+
+    // The case that actually happened: an older bundle won the race, so nothing
+    // 3.0 adds ran at all. Neither version could explain that before.
+    var oldFirst = runTag(consented({
+      tagPath: path.join(__dirname, '..', 'conversio_runtime_tag_v2.6.3.js'),
+      tagSource: OLD,
+      alsoRun: fs.readFileSync(tagPath, 'utf8'),
+      cookies: { _cvo_aud: 'v1.' + Math.floor(Date.now() / 1000) + '.,lapsed_90d,' }
+    }));
+    check('an older bundle winning the race leaves no version reported',
+      oldFirst.window.conversioSettings.version === undefined,
+      JSON.stringify(oldFirst.window.conversioSettings));
+    check('but 3.0 standing down is recorded, which is the whole point',
+      JSON.stringify(oldFirst.window.conversioSettings.blockedVersions) === '["3.0"]',
+      JSON.stringify(oldFirst.window.conversioSettings));
+    check('and that is exactly why the audience never appeared',
+      oldFirst.window.conversioAudience === undefined,
+      JSON.stringify(oldFirst.window.conversioAudience));
+  })();
+
   return { pass: pass, fail: fail };
 }
 

@@ -68,6 +68,11 @@ var VITALS_FIXTURE = [
 //     a browser offering no high-resolution clock at all is simulated (the tag
 //     falls back to Date.now()); Core Web Vitals collection is unaffected
 //     either way, since it reads performance entries rather than the clock.
+//   alsoRun: a second tag source, executed in the same sandbox straight after
+//     the first, for the two-copies-on-one-page case. That is a real state
+//     while one version is being tested against another, and the double-init
+//     guard means the second does nothing, so a test needs to be able to
+//     produce it.
 //   cookies: seed object for document.cookie, {name: value}
 //   cookiesThrow: document.cookie throws on read and write, as it does in a
 //     sandboxed iframe and where cookies are blocked outright
@@ -306,6 +311,10 @@ function runTag(opts) {
 
   var context = vm.createContext(sandbox);
   vm.runInContext(source, context, { filename: opts.tagPath });
+
+  if (typeof opts.alsoRun === 'string') {
+    vm.runInContext(opts.alsoRun, context, { filename: opts.tagPath + ' (second copy)' });
+  }
 
   // The next timer due at or before the limit, earliest first.
   function nextDueTimer(limit) {
