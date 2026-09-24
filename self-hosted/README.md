@@ -672,6 +672,115 @@ checks a value looks right where someone can still see the error; the Worker
 separately checks it is safe to serve, because a record hand-edited into KV
 through the Cloudflare dashboard never passed through either.
 
+### Going to production
+
+The route has never been deployed to production. Deploying it publishes four
+things and changes nothing for any client.
+
+**What the deploy publishes**
+
+- the `/a/<clientKey>/<conversio_id>` route
+- `resolveClient`, the access-control checks both routes now share
+- the audience endpoint substitution at serve time
+- the 3.0 bundle, as an *available* version
+
+**Why no client is affected by any of it**
+
+- No key has `--audiences true`, so the route answers 404 for every key that
+  exists. Enabling one is a separate command and a separate decision.
+- The endpoint substitution is a no-op on any bundle that has no slot to
+  substitute, which is every bundle before 3.0.
+- Nobody moves version. Every key keeps whatever its record pins, exactly as
+  when a new bundle is added normally.
+
+**The one real risk, stated plainly.** `resolveClient` is a refactor of the code
+path deciding whether *any* client is served at all. 57 checks in
+`test/loader.test.js` assert it behaves identically, covering every refusal
+reason and the cache headers each one carries. That is good evidence, and it is
+not production, which is why the verification below is not ceremony.
+
+#### Before deploying
+
+```bash
+node --test 'test/*.test.js'
+```
+
+All 14 suites. Then confirm the committed bundle matches its source, and capture
+the current state of every key, which is the record you would roll back to:
+
+```bash
+cd self-hosted && node scripts/build-bundle.mjs 3.0 --check && node scripts/manage-keys.mjs list
+```
+
+#### Deploying
+
+```bash
+cd self-hosted && npx wrangler deploy --env=""
+```
+
+`--env=""`, never `--env production`. The latter deploys a **new** Worker called
+`conversio-tag-loader-production` and leaves this one, and its custom domain,
+behind. See the [Staging](#staging) section for why.
+
+#### Verifying, immediately
+
+Every live client, one at a time:
+
+```bash
+cd self-hosted && node scripts/manage-keys.mjs verify cvo_xxxxxxxxxxxxxxxxxxxxxxxx
+```
+
+Each must report the bundle serving, on the version and tracking ID that `list`
+showed before the deploy. This is the check that matters: it is the refactor
+above being confirmed against real traffic rather than against its tests.
+
+Then confirm the new route is inert for a client who should not have it:
+
+```bash
+curl -s -o /dev/null -w "%{http_code}\n" \
+  https://tag.conversio.dev/a/cvo_xxxxxxxxxxxxxxxxxxxxxxxx/con_aaaaaaaaaaaaaaaa.1700000000000000
+```
+
+404 is correct. Anything else means a key has audiences enabled that should not.
+
+#### Rolling back
+
+Faster than reverting the commit and redeploying:
+
+```bash
+cd self-hosted && npx wrangler rollback --env=""
+```
+
+It restores the previous deployment of this Worker. Client records are untouched
+by either direction, since a deploy never writes to KV.
+
+#### What to watch afterwards
+
+Four reason codes are new in Workers Logs, and on a correctly deployed
+production Worker **all four should be silent**:
+
+| Reason | What it would mean |
+| --- | --- |
+| `audiences_not_enabled` | something asked `/a/` for a key without the flag. No deployed bundle contains an endpoint yet, so real traffic cannot produce this: it means someone is probing |
+| `audiences_unbound` | the `AUDIENCES` binding is missing, so the deploy did not pick up `wrangler.toml` |
+| `audience_endpoint_rejected` | a built endpoint failed its safety check, which should not be reachable |
+| `audience_lookup_error` | the namespace is reachable but erroring |
+
+The production `AUDIENCES` namespace is bound and **empty**. That is the expected
+state: nothing writes to it until a client is enabled and a load is run.
+
+#### Enabling a client is a later, separate decision
+
+Two live-traffic changes to that client, neither implied by the deploy:
+
+```bash
+cd self-hosted && node scripts/manage-keys.mjs update cvo_xxxxxxxxxxxxxxxxxxxxxxxx --audiences true --version 3.0
+```
+
+Set `--domains` at the same time if it is not already set. This route returns
+data about an individual rather than a public measurement ID, and it is the one
+route where the allow-list is actually enforceable.
+
 ### Failure modes
 
 | Reason logged | Response | Means |
