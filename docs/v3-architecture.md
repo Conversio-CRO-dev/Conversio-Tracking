@@ -264,10 +264,46 @@ all. So a visitor's ID lands in the export **only if they already triggered a
 Conversio experience or a mapped event**.
 
 Audiences derived from that cover only the people already experimented on, which
-is circular and small. Fix by setting `conversio_id` as a **user-scoped custom
-dimension** once per session, so it joins every subsequent hit. Not retroactive:
-the dataset can only be built from the day it ships, which is the argument for
-shipping it before anything else here is designed in detail.
+is circular and small. The fix is `conversio_id` as a **user-scoped custom
+dimension**, so it joins every subsequent hit.
+
+**How it was done on conversio.com, and how to do it per client:** as a user
+property in the **Google Tag's own settings** in the client's GTM container, not
+from the runtime tag. That scoping is the reason. A `gtag('set', 'user_properties',
+...)` from inside the tag is global to the gtag instance, so on a site running
+more than one GA4 property the id would land in all of them, which cuts directly
+against the care the tag already takes in pinning every send with `send_to`. The
+Google Tag keeps it to the destinations that tag configures.
+
+**Not retroactive**, so it can only ever be built from the day it ships on that
+client's property. Done on conversio.com on 24 September 2026; still outstanding
+everywhere the data would actually be used.
+
+**One gap to design the SQL around rather than debug later.** The Google Tag
+fires early, and on a first-ever visit the runtime tag has not minted an id yet
+when it does, so that page view's events carry no `conversio_id` at all. In
+BigQuery those rows look like missing data and are not: the same browser carries
+the id from its next page view on.
+
+Do not filter events on the id being present. Build a mapping first and join
+through it, so every event of a browser that has ever reported an id is
+attributed:
+
+```sql
+WITH ids AS (
+  SELECT user_pseudo_id,
+         ANY_VALUE((SELECT value.string_value FROM UNNEST(user_properties)
+                    WHERE key = 'conversio_id')) AS conversio_id
+  FROM \`PROJECT.analytics_NNNNNN.events_*\`
+  WHERE (SELECT value.string_value FROM UNNEST(user_properties)
+         WHERE key = 'conversio_id') IS NOT NULL
+  GROUP BY user_pseudo_id
+)
+SELECT ... FROM events e JOIN ids USING (user_pseudo_id)
+```
+
+That also protects against the id being absent for other reasons: blocked
+storage, a consent signal that arrived late, or Safari having cleared it.
 
 ### 6.2 Safari's storage cap applies to both halves
 
