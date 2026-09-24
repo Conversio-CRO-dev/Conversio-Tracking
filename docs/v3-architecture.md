@@ -311,6 +311,22 @@ direction that matters, so it gets the alert.
 
 ## 8. What to build, in order
 
+**Status, 24 September 2026.** Steps 2 and 3 are done and proven on staging;
+steps 0 and 1 are outstanding and are the two that actually de-risk this.
+
+| Step | State |
+| --- | --- |
+| 0. Prove the audiences separate behaviour | **not started.** Andy is taking this on. Still the only step that can show the idea is wrong cheaply. |
+| 1. Get `conversio_id` onto ordinary GA4 hits | **not started**, and not retroactive, so the clock has not started |
+| 2. The pipeline | **done.** BigQuery table, loader CLI, Worker route, all proven end to end on staging |
+| 3. The cookie | **done.** Tag 3.0, verified in a real browser on conversio.com against the staging Worker |
+| 4. One campaign targeting the cookie | next. The last unproven link, and the only one in a system we do not control |
+| 5. One real client | after 0 and 4 |
+
+Nothing is in production. No client key has `--audiences true`, and the
+production Worker has not been deployed with the route.
+
+
 ### Step 0, and it needs no engineering at all
 
 **Prove the audiences separate behaviour, in BigQuery, before building anything
@@ -332,26 +348,45 @@ Note this is partly circular with step 0, which can only use the IDs already
 present. Run step 0 on the population that exists today, accepting it is
 experiment-exposed and biased, and treat it as directional.
 
-### Step 2: the pipeline, end to end, on synthetic scale
+### Step 2: the pipeline, end to end, on synthetic scale — **done**
 
 Derivation, distribution and serving (§5.1 to §5.3) with a synthetic dataset at
 realistic cardinality: a million IDs, not a hundred. This proves the delta write
 economics and the KV read path, which are the two things that behave differently
 at scale, and it needs no site and no traffic.
 
-### Step 3: the cookie, on conversio.com
+### Step 3: the cookie, on conversio.com — **done**
 
 Functional only. conversio.com is a low-traffic marketing site and will not tell
 you anything about performance, but it will tell you the tag writes a
 well-formed cookie, the refresh logic fires when it should, and a withdrawal
 clears it.
 
-### Step 4: one AB Tasty campaign targeting the cookie
+### Step 4: one AB Tasty campaign targeting the cookie — **next**
 
 Also on conversio.com, also functional. This is the step that proves the contract
 in §4 survives contact with the platform: that AB Tasty can target the cookie the
 way we think, that the comma-wrapping works as a match, and that the existing
 `conversioAbtastyQueue` reporting still closes the loop.
+
+The targeting rule to configure, precisely:
+
+| | |
+| --- | --- |
+| Condition type | cookie |
+| Cookie name | `_cvo_aud` |
+| Operator | contains |
+| Value | `,lapsed_90d,` |
+
+**With the commas.** Matching the bare code would also match a longer one that
+contains it, so `outerwear` would silently pick up `winter-outerwear` and widen
+the audience with nothing to show for it. The delimiters exist for that and the
+rule has to use them.
+
+Two things this is really testing, neither of which is about our code. Whether
+the platform evaluates cookie conditions before its own anti-flicker releases the
+page, which decides whether this personalises or merely corrects. And whether the
+plan on these accounts supports cookie targeting at all.
 
 ### Step 5: one real client, one audience, one campaign
 
