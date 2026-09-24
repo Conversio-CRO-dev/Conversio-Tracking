@@ -317,7 +317,7 @@ steps 0 and 1 are outstanding and are the two that actually de-risk this.
 | Step | State |
 | --- | --- |
 | 0. Prove the audiences separate behaviour | **not started.** Andy is taking this on. Still the only step that can show the idea is wrong cheaply. |
-| 1. Get `conversio_id` onto ordinary GA4 hits | **not started**, and not retroactive, so the clock has not started |
+| 1. Get `conversio_id` onto ordinary GA4 hits | **done on conversio.com** (24 Sep 2026). Not done on any client whose data would feed a real audience, and not retroactive, so on those the clock has still not started |
 | 2. The pipeline | **done.** BigQuery table, loader CLI, Worker route, all proven end to end on staging |
 | 3. The cookie | **done.** Tag 3.0, verified in a real browser on conversio.com against the staging Worker, with the production tag paused |
 | 4. One campaign targeting the cookie | next. The last unproven link, and the only one in a system we do not control |
