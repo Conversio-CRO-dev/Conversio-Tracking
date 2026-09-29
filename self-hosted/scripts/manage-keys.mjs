@@ -187,12 +187,49 @@ function generateKey() {
   return 'cvo_' + randomBytes(18).toString('base64url');
 }
 
+// Strict --flag value pairs, and strict on purpose. Stepping by two means a
+// flag with no value silently swallows the next pair, and the consequences here
+// are not cosmetic: a trailing "--audiences" leaves the key present with an
+// undefined value, which normaliseAudiences reads as the empty string, which
+// reads as "off", so the flag is DELETED while every other change in the same
+// command goes through. "--tracking-id" with no value clears a client's GA
+// property the same way and takes their GA4 delivery with it.
+//
+// Both were silent. Neither is now.
+//
+// An explicitly empty value is still how you clear something, and it survives:
+// --tracking-id "" passes an actual empty string, which is distinguishable from
+// a flag that simply ran off the end of the line.
 function parseFlags(argv) {
   const flags = {};
+
   for (let i = 0; i < argv.length; i += 2) {
-    const name = argv[i].replace(/^--/, '');
-    flags[name] = argv[i + 1];
+    const token = argv[i];
+
+    if (!token.startsWith('--')) {
+      console.error(`Expected a --flag but got "${token}".`);
+      console.error('Flags are strict --name value pairs. Quote any value containing spaces.');
+      process.exit(1);
+    }
+
+    const name = token.replace(/^--/, '');
+    const value = argv[i + 1];
+
+    if (value === undefined) {
+      console.error(`--${name} has no value.`);
+      console.error(`If you meant to clear it, say so explicitly: --${name} ""`);
+      process.exit(1);
+    }
+
+    if (value.startsWith('--')) {
+      console.error(`--${name} has no value: the next token is "${value}", which is another flag.`);
+      console.error(`If you meant to clear it, say so explicitly: --${name} ""`);
+      process.exit(1);
+    }
+
+    flags[name] = value;
   }
+
   return flags;
 }
 
