@@ -208,9 +208,20 @@ Optional flags:
 - `--version 2.5.1` pins that client to a specific bundle in `public/`. Useful
   if a client needs to stay on an older version while others move forward.
   Note this defaults to `2.2`, not to the newest bundle present, so pass it
-  explicitly when issuing a key for a current-version client. Same for
-  `DEFAULT_VERSION` in `src/index.js`, which covers a record with no version
-  at all.
+  explicitly when issuing a key for a current-version client.
+
+  The value is checked against the bundles actually in `public/` before
+  anything is written, and an unknown one fails at the terminal listing what
+  is available. That check exists because the failure it prevents is invisible:
+  a key pinned to a version nobody deployed makes the Worker log
+  `asset_missing` and serve that client the inactive stub, so their tracking
+  stops behind a clean 200 with nothing surfaced to them or to you. It reads
+  your working tree rather than the deployment, so `verify` remains the step
+  that proves what a client is really being served.
+
+  There is **no `DEFAULT_VERSION`** in `src/index.js`. A record with no version,
+  or one that is not version-shaped, gets the inactive stub and a
+  `version_invalid` log rather than falling back to some other client's bundle.
 - `--domains acme.com,www.acme.com` locks the key to those origins, checked
   against the `Referer` header (script tags don't send `Origin`). Only set
   this if you're confident the client site doesn't run a `no-referrer`
@@ -510,6 +521,328 @@ Things worth knowing:
 
 ---
 
+## Audiences (v3, in progress)
+
+The serving plane of the v3 architecture (see
+[`docs/v3-architecture.md`](../docs/v3-architecture.md)). One route on this
+Worker answers what audiences a client has for a given visitor:
+
+```
+GET /a/<clientKey>/<conversio_id>
+```
+
+```json
+{ "v": 1, "ts": 1758585600, "a": ["lapsed", "outerwear"] }
+```
+
+`ts` is when the audience was **computed**, not when it was served. Those diverge
+exactly when the derivation pipeline has stopped, which is the case worth being
+able to see, so it is the number to alert on.
+
+**This route is not on the critical path of anything, and that is by design.**
+Audiences are derived nightly, so they are up to a day old the moment they are
+written and a real-time lookup buys nothing. The tag fetches this whenever it
+happens to run, which under GTM is late, and writes the answer to a first-party
+cookie. The page that uses it is the *next* one, where the client's
+experimentation platform reads the cookie at time zero with no lookup at all. A
+failure here therefore costs a stale cookie rather than a wrong page, and the
+route has no latency budget worth the name.
+
+It also means the request rate is **once per visitor per day**, the tag gating it
+on cookie freshness, rather than once per page view.
+
+### What the tag gets
+
+The Worker patches a second value into the bundle at serve time, beside the
+tracking ID: the audience endpoint for that client.
+
+```
+@@CONVERSIO_AUDIENCE_ENDPOINT@@  ->  https://tag.conversio.dev/a/cvo_xxxxx.../
+```
+
+It is **built rather than copied**, from the request's own origin plus the key
+already matched by the route. So a bundle served from staging points at staging
+and one served from production points at production, with nothing to keep in sync
+and no way to get them crossed. The result is checked against a strict pattern
+before being spliced, for the same reason the tracking ID is: it lands inside a JS
+string literal that then runs on every page of the client's site.
+
+A client without `--audiences true` gets an empty slot, so the tag makes no
+request at all. Until that flag is set, all of this is inert rather than merely
+unused. See [Audiences (3.0)](../README.md#audiences-30) for what the tag does
+with it.
+
+### Setting it up
+
+One namespace, once:
+
+```bash
+npx wrangler kv namespace create AUDIENCES
+```
+
+Paste the id into `wrangler.toml` over `REPLACE_ME_AUDIENCES_NAMESPACE_ID`, and do
+the same for staging with `--env staging`. Until then the route answers 503 and
+nothing else changes, so deploying ahead of creating it is safe.
+
+### Turning it on for a client
+
+Opt-in per client, the same way a tracking ID is. Without it the route answers
+404 for that key, because answering at all is a statement that this client has
+audiences, which for most of them is not true.
+
+```bash
+node scripts/manage-keys.mjs update cvo_xxxxxxxxxxxxxxxxxxxxxxxx --audiences true
+```
+
+`--audiences false` turns it off again and removes the flag. `list` shows it
+alongside the version and tracking ID.
+
+**Set `--domains` on any client using audiences.** This route returns data about
+an individual rather than a public measurement ID, and unlike the bundle it can
+actually enforce an allow-list: a `fetch` sends `Origin` where a `<script src>`
+sends only `Referer`. With no allow-list configured the route echoes whatever
+origin asked, which rests entirely on the two unguessable secrets involved, a
+client key and a CSPRNG visitor id.
+
+### Loading audience data
+
+`scripts/manage-audiences.mjs` takes a BigQuery export and writes it into the
+`AUDIENCES` namespace. Export the table with the three fields it wants:
+
+```bash
+bq query --nouse_legacy_sql --format=json \
+  'SELECT conversio_id, audiences, UNIX_SECONDS(computed_at) AS ts
+     FROM `PROJECT.conversio_v3.audience_membership`' > rows.json
+```
+
+Then check it before it goes anywhere:
+
+```bash
+node scripts/manage-audiences.mjs load cvo_xxxxxxxxxxxxxxxxxxxxxxxx --file rows.json --dry-run
+```
+
+`--dry-run` validates every row and prints what would be written, touching no
+network at all, so it is a real check of an export rather than a check that
+happens to skip the last step. Drop the flag to write.
+
+```bash
+node scripts/manage-audiences.mjs show cvo_xxxxxxxxxxxxxxxxxxxxxxxx con_....1700000000000000
+node scripts/manage-audiences.mjs list cvo_xxxxxxxxxxxxxxxxxxxxxxxx
+node scripts/manage-audiences.mjs delete cvo_xxxxxxxxxxxxxxxxxxxxxxxx con_....1700000000000000
+```
+
+`delete` removes one visitor, which is what an erasure request needs. Note it
+reaches one of three stores: the BigQuery row and any cookie already on that
+visitor's browser are unaffected.
+
+`clear` removes every audience record a client has:
+
+```bash
+node scripts/manage-audiences.mjs clear cvo_xxxxxxxxxxxxxxxxxxxxxxxx --dry-run
+node scripts/manage-audiences.mjs clear cvo_xxxxxxxxxxxxxxxxxxxxxxxx --yes
+```
+
+It is deliberately harder to run than the rest. It needs `--yes`, it looks the
+client up and names them back at you before deleting anything, and it refuses to
+guess: without `--yes` or `--dry-run` it exits telling you both. The mistake it
+exists to prevent is clearing the wrong client, and a key is 28 characters of
+base64 nobody reads carefully.
+
+It is for the two cases a reload does not cover: cleaning up after a test, where
+the records are real and the client is not, and offboarding, where the client is
+real and the records should not outlive them. A reload overwrites the visitors
+it contains and says nothing about the ones it does not, so it is not a way to
+empty anything.
+
+If the client still has `--audiences true` when you clear them, the route starts
+answering every visitor with an empty list rather than their real one. The
+command warns about that rather than refusing, since it is a coherent thing to
+want and only a bad thing to do by accident.
+
+**A bad row refuses the whole file.** A half-loaded dataset is worse than a
+refused one, because the rows that landed are indistinguishable from correct ones
+afterwards and the codes come from a job nobody is watching. `--skip-invalid`
+loads the valid rows and reports the rest, for when that is what you want.
+
+It reads what `bq` actually produces rather than one assumed shape: a JSON array
+or newline-delimited JSON, `INT64` arriving quoted as BigQuery renders it, a
+`computed_at` timestamp where the export forgot to convert it, and the
+`[{"v": "..."}]` form some paths use for repeated fields.
+
+Two refusals worth knowing about. A client key of the wrong shape is refused
+before the file is even read, because writing a dataset under a mistyped key
+leaves it orphaned and invisible rather than failing. And a client without
+`--audiences true` is refused with the command to fix it, since data loaded for a
+key that cannot serve it is silently wasted; `--force` loads it anyway.
+
+Covered by `test/manage-audiences.test.js`, which drives the real CLI through
+`--dry-run` against every shape above.
+
+### What is validated, and why twice
+
+A code ends up inside a comma-delimited cookie value on the client's own domain.
+So the Worker checks every code it serves against `[a-z0-9][a-z0-9_-]{0,31}` and
+caps the list at 24, whatever the stored record says.
+
+The comma is the one that matters: a code containing one would split into two
+inside the cookie and forge a membership the visitor does not have. Semicolons,
+quotes, whitespace and control characters go for the same class of reason, and
+the cap exists because cookies ride every request to the client's domain.
+
+This is the same two-sided arrangement as the tracking ID. A loader job or CLI
+checks a value looks right where someone can still see the error; the Worker
+separately checks it is safe to serve, because a record hand-edited into KV
+through the Cloudflare dashboard never passed through either.
+
+### Going to production
+
+The route has never been deployed to production. Deploying it publishes four
+things and changes nothing for any client.
+
+**What the deploy publishes**
+
+- the `/a/<clientKey>/<conversio_id>` route
+- `resolveClient`, the access-control checks both routes now share
+- the audience endpoint substitution at serve time
+- the 3.0 bundle, as an *available* version
+
+**Why no client is affected by any of it**
+
+- No key has `--audiences true`, so the route answers 404 for every key that
+  exists. Enabling one is a separate command and a separate decision.
+- The endpoint substitution is a no-op on any bundle that has no slot to
+  substitute, which is every bundle before 3.0.
+- Nobody moves version. Every key keeps whatever its record pins, exactly as
+  when a new bundle is added normally.
+
+**The one real risk, stated plainly.** `resolveClient` is a refactor of the code
+path deciding whether *any* client is served at all. 57 checks in
+`test/loader.test.js` assert it behaves identically, covering every refusal
+reason and the cache headers each one carries. That is good evidence, and it is
+not production, which is why the verification below is not ceremony.
+
+#### Before deploying
+
+```bash
+node --test 'test/*.test.js'
+```
+
+All 14 suites. Then confirm the committed bundle matches its source, and capture
+the current state of every key, which is the record you would roll back to:
+
+```bash
+cd self-hosted && node scripts/build-bundle.mjs 3.0 --check && node scripts/manage-keys.mjs list
+```
+
+#### Deploying
+
+```bash
+cd self-hosted && npx wrangler deploy --env=""
+```
+
+`--env=""`, never `--env production`. The latter deploys a **new** Worker called
+`conversio-tag-loader-production` and leaves this one, and its custom domain,
+behind. See the [Staging](#staging) section for why.
+
+#### Verifying, immediately
+
+Every live client, one at a time:
+
+```bash
+cd self-hosted && node scripts/manage-keys.mjs verify cvo_xxxxxxxxxxxxxxxxxxxxxxxx
+```
+
+Each must report the bundle serving, on the version and tracking ID that `list`
+showed before the deploy. This is the check that matters: it is the refactor
+above being confirmed against real traffic rather than against its tests.
+
+Then confirm the new route is inert for a client who should not have it:
+
+```bash
+curl -s -o /dev/null -w "%{http_code}\n" \
+  https://tag.conversio.dev/a/cvo_xxxxxxxxxxxxxxxxxxxxxxxx/con_aaaaaaaaaaaaaaaa.1700000000000000
+```
+
+404 is correct. Anything else means a key has audiences enabled that should not.
+
+#### Rolling back
+
+Faster than reverting the commit and redeploying:
+
+```bash
+cd self-hosted && npx wrangler rollback --env=""
+```
+
+It restores the previous deployment of this Worker. Client records are untouched
+by either direction, since a deploy never writes to KV.
+
+#### What to watch afterwards
+
+Four reason codes are new in Workers Logs, and on a correctly deployed
+production Worker **all four should be silent**:
+
+| Reason | What it would mean |
+| --- | --- |
+| `audiences_not_enabled` | something asked `/a/` for a key without the flag. No deployed bundle contains an endpoint yet, so real traffic cannot produce this: it means someone is probing |
+| `audiences_unbound` | the `AUDIENCES` binding is missing, so the deploy did not pick up `wrangler.toml` |
+| `audience_endpoint_rejected` | a built endpoint failed its safety check, which should not be reachable |
+| `audience_lookup_error` | the namespace is reachable but erroring |
+
+The production `AUDIENCES` namespace is bound and **empty**. That is the expected
+state: nothing writes to it until a client is enabled and a load is run.
+
+#### Enabling a client is a later, separate decision
+
+Two live-traffic changes to that client, neither implied by the deploy:
+
+```bash
+cd self-hosted && node scripts/manage-keys.mjs update cvo_xxxxxxxxxxxxxxxxxxxxxxxx --audiences true --version 3.0
+```
+
+Set `--domains` at the same time if it is not already set. This route returns
+data about an individual rather than a public measurement ID, and it is the one
+route where the allow-list is actually enforceable.
+
+**Then check, on that client's site, that only one Conversio tag is running:**
+
+```js
+window.conversioSettings   // { version: '3.0', trackingId: 'G-...' }
+```
+
+`blockedVersions` must be absent. If it is there, two copies of the tag are on
+the page and only one of them did anything. This is not hypothetical: it
+happened on conversio.com during the staging trial, where an existing 2.6.3 tag
+won the race and the 3.0 one stood down in silence, which looked exactly like 3.0
+being broken.
+
+A client migrating to a new version is the likeliest place to hit it, because
+that is when an old pasted-inline tag and a new loader-served one are most likely
+to be on the page together. **Remove the old tag in the same container version
+that adds the new one**, rather than in a follow-up: two published versions means
+a window where both are live, and in that window the one that wins the race is
+whichever the browser happens to execute first.
+
+### Failure modes
+
+| Reason logged | Response | Means |
+| --- | --- | --- |
+| `audiences_not_enabled` | 404 | the key is live but has no `--audiences` |
+| `audience_id_invalid` | 400 | the id is not `conversio_id`-shaped; a tag that changed the format would show up here |
+| `audiences_unbound` | 503 | the KV namespace is not bound, i.e. not created yet |
+| `audience_lookup_error` | 503 | the namespace is down |
+| `audience_serve_error` | 503 | anything else, guarded so it cannot escape as a 500 |
+
+Every one of them answers with JSON. Nothing this route depends on can put HTML
+into a response the tag is about to parse, which is the loader's own rule with a
+second reason behind it here: an HTML error page becomes a parse failure inside
+the client's page rather than a readable status.
+
+A miss is **not** in that table. An unknown visitor gets a 200 and an empty list,
+because being in no audience is an answer rather than a failure, and it is the
+common one: most visitors are in nothing, and a first-time visitor has no
+behavioural history to be in anything with. The empty answer is what stops the
+tag asking again on every page view.
+
 ## Shipping a new bundle version
 
 From 2.4.1 on the bundle is built from the GTM copy rather than being a
@@ -548,6 +881,12 @@ Moving one client over is the risky step, and it's one command:
 ```bash
 node scripts/manage-keys.mjs update cvo_xxxxxxxxxxxxxxxxxxxxxxxx --version 2.5.1
 ```
+
+The version is checked against `public/` before the key is even looked up, so a
+typo costs a terminal error rather than a silent outage on that client. What is
+not checked is the key: one mistyped key moves the wrong client, and nothing
+asks you to confirm. Run `show` first and `list` after, which is also the
+record you would roll back from.
 
 Rolling that client back is the same command with the old version, taking
 effect as soon as the cache purge lands.
