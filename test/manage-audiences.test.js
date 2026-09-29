@@ -141,6 +141,28 @@ check('refuses truncated JSON', r.status !== 0, r.out);
 r = run({ body: [] });
 check('refuses an empty export rather than reporting success', r.status !== 0, r.out);
 
+// 6. clear: the guards, which are all that can be reached without a network.
+// The deletion itself needs wrangler and a real namespace, so it is not covered
+// here and is exercised on staging instead.
+function runClear(args) {
+  try {
+    return { status: 0, out: execFileSync("node", [CLI, "clear"].concat(args), { encoding: "utf8", stdio: "pipe" }) };
+  } catch (e) {
+    return { status: e.status, out: (e.stdout || "") + (e.stderr || "") };
+  }
+}
+
+var c = runClear([KEY]);
+check("clear refuses without --yes", c.status !== 0, c.out);
+check("and says how to see what would go first", c.out.indexOf("--dry-run") !== -1, c.out);
+check("and how to actually do it", c.out.indexOf("--yes") !== -1, c.out);
+check("and refuses before touching the network",
+  c.out.indexOf("environment") === -1, c.out);
+
+c = runClear(["cvo_short", "--yes"]);
+check("clear validates the client key shape first", c.status !== 0, c.out);
+check("before anything else at all", c.out.indexOf("Not a client key") !== -1, c.out);
+
 fs.rmSync(DIR, { recursive: true, force: true });
 
 console.log('\nself-hosted/scripts/manage-audiences.mjs: ' + pass + ' passed, ' + fail + ' failed\n');

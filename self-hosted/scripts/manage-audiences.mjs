@@ -11,6 +11,7 @@
 //   node manage-audiences.mjs show <clientKey> <conversioId>
 //   node manage-audiences.mjs list <clientKey> [--limit 20]
 //   node manage-audiences.mjs delete <clientKey> <conversioId>
+//   node manage-audiences.mjs clear <clientKey> --yes
 //
 // Every command takes --env, as manage-keys.mjs does.
 //
@@ -399,6 +400,85 @@ function cmdDelete(argv) {
   console.log('that visitor\'s browser are unaffected. See docs/v3-architecture.md §9.5.');
 }
 
+// Every audience record a client has. Deliberately harder to run than the rest:
+// it needs --yes, it names the client back at you first, and it refuses to guess
+// what you meant.
+//
+// It exists for the two cases a reload does not cover. Cleaning up after a test,
+// where the records are real but the client is not; and offboarding, where the
+// client is real and the records should not outlive them. A reload overwrites
+// the visitors it contains and says nothing about the ones it does not, so it is
+// not a way to empty anything.
+function cmdClear(argv) {
+  const { flags, positional } = parseFlags(argv);
+  const clientKey = requireClientKey(positional[0]);
+
+  if (!flags.yes && !flags['dry-run']) {
+    console.error('Refusing to delete without --yes.');
+    console.error(`  node scripts/manage-audiences.mjs clear ${clientKey} --dry-run   # see what would go`);
+    console.error(`  node scripts/manage-audiences.mjs clear ${clientKey} --yes       # delete it`);
+    process.exit(1);
+  }
+
+  announceEnv();
+
+  // Named, not just counted. The mistake this command exists to prevent is
+  // clearing the wrong client, and a key is 28 characters of base64 that nobody
+  // reads carefully.
+  const record = clientRecord(clientKey);
+  if (!record) {
+    console.error(`\nNo client key record for ${clientKey}. Check it with manage-keys.mjs list.`);
+    process.exit(1);
+  }
+
+  const keys = JSON.parse(wrangler(['kv', 'key', 'list', '--binding', AUDIENCES_BINDING,
+    '--remote', '--prefix', `aud:${clientKey}:`])).map((k) => k.name);
+
+  if (!keys.length) {
+    console.log(`\n${record.client} has no audience records. Nothing to do.`);
+    return;
+  }
+
+  console.log(`\n${keys.length} audience record(s) for ${record.client}.`);
+
+  if (flags['dry-run']) {
+    keys.slice(0, 10).forEach((k) => console.log('  ' + k));
+    if (keys.length > 10) console.log(`  ... and ${keys.length - 10} more`);
+    console.log('\n--dry-run: nothing deleted.');
+    return;
+  }
+
+  // The route stops answering the moment the flag is off, so clearing a client
+  // who still has audiences enabled leaves them being served empty lists rather
+  // than their real ones. That is a coherent thing to want and a bad thing to do
+  // by accident.
+  if (record.audiences === true) {
+    console.log('NOTE: this client still has --audiences true, so the route will');
+    console.log('      answer every visitor with an empty list until it is reloaded.');
+  }
+
+  let deleted = 0;
+  for (let i = 0; i < keys.length; i += CHUNK) {
+    bulkDelete(keys.slice(i, i + CHUNK));
+    deleted += Math.min(CHUNK, keys.length - i);
+    if (keys.length > CHUNK) console.log(`  ${deleted}/${keys.length}`);
+  }
+
+  console.log(`\nDeleted ${deleted} audience record(s) for ${record.client}.`);
+  console.log('The BigQuery rows are untouched, and so is any cookie already on a');
+  console.log('visitor: that expires on its own and nothing here can reach it.');
+}
+
+function bulkDelete(keys) {
+  const file = join(tmpdir(), `conversio-audiences-delete-${process.pid}-${Date.now()}.json`);
+  writeFileSync(file, JSON.stringify(keys));
+  try {
+    wrangler(['kv', 'bulk', 'delete', file, '--binding', AUDIENCES_BINDING, '--remote', '--force']);
+  } finally {
+    try { unlinkSync(file); } catch (e) { /* best effort */ }
+  }
+}
+
 const [command, ...rest] = ARGV;
 
 switch (command) {
@@ -406,7 +486,8 @@ switch (command) {
   case 'show': cmdShow(rest); break;
   case 'list': cmdList(rest); break;
   case 'delete': cmdDelete(rest); break;
+  case 'clear': cmdClear(rest); break;
   default:
-    console.error('Unknown command. Use: load | show | list | delete');
+    console.error('Unknown command. Use: load | show | list | delete | clear');
     process.exit(1);
 }

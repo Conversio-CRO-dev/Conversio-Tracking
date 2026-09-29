@@ -631,11 +631,33 @@ node scripts/manage-audiences.mjs list cvo_xxxxxxxxxxxxxxxxxxxxxxxx
 node scripts/manage-audiences.mjs delete cvo_xxxxxxxxxxxxxxxxxxxxxxxx con_....1700000000000000
 ```
 
-`delete` removes one visitor, which is what an erasure request needs. There is
-deliberately no bulk delete: emptying a client's audiences is a thing to do
-rarely and on purpose, and a reload overwrites anyway. Note it reaches one of
-three stores, the BigQuery row and any cookie already on that visitor's browser
-being unaffected.
+`delete` removes one visitor, which is what an erasure request needs. Note it
+reaches one of three stores: the BigQuery row and any cookie already on that
+visitor's browser are unaffected.
+
+`clear` removes every audience record a client has:
+
+```bash
+node scripts/manage-audiences.mjs clear cvo_xxxxxxxxxxxxxxxxxxxxxxxx --dry-run
+node scripts/manage-audiences.mjs clear cvo_xxxxxxxxxxxxxxxxxxxxxxxx --yes
+```
+
+It is deliberately harder to run than the rest. It needs `--yes`, it looks the
+client up and names them back at you before deleting anything, and it refuses to
+guess: without `--yes` or `--dry-run` it exits telling you both. The mistake it
+exists to prevent is clearing the wrong client, and a key is 28 characters of
+base64 nobody reads carefully.
+
+It is for the two cases a reload does not cover: cleaning up after a test, where
+the records are real and the client is not, and offboarding, where the client is
+real and the records should not outlive them. A reload overwrites the visitors
+it contains and says nothing about the ones it does not, so it is not a way to
+empty anything.
+
+If the client still has `--audiences true` when you clear them, the route starts
+answering every visitor with an empty list rather than their real one. The
+command warns about that rather than refusing, since it is a coherent thing to
+want and only a bad thing to do by accident.
 
 **A bad row refuses the whole file.** A half-loaded dataset is worse than a
 refused one, because the rows that landed are indistinguishable from correct ones
