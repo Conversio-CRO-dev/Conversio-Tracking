@@ -471,6 +471,15 @@ function cmdClear(argv) {
 
 function bulkDelete(keys) {
   const file = join(tmpdir(), `conversio-audiences-delete-${process.pid}-${Date.now()}.json`);
+
+  // An array of plain strings. wrangler accepts that or objects with a "name"
+  // key, per its own validator: "Expected an array of strings or objects with a
+  // \"name\" key." The second form is what kv key list emits, so either would do;
+  // strings are written because that is what cmdClear already has.
+  //
+  // --force below suppresses the interactive confirmation, which there is
+  // nothing to answer in a script. The confirmation this command actually
+  // relies on is --yes, checked in cmdClear before any of this runs.
   writeFileSync(file, JSON.stringify(keys));
   try {
     wrangler(['kv', 'bulk', 'delete', file, '--binding', AUDIENCES_BINDING, '--remote', '--force']);
