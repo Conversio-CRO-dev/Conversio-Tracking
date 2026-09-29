@@ -346,7 +346,18 @@ var AUDIENCE_MAX_CODES = 24;
 function audienceOriginAllowed(origin, record) {
   var hostname;
 
-  if (!record || !record.domains || !record.domains.length) return true;
+  // No record means this is a refusal reached before, or instead of, resolving
+  // the client: an unknown key, a revoked one, a malformed id, a rate limit.
+  // Those must not be readable cross-origin. The body says nothing worth having,
+  // but a refusal that any page can read is still a refusal handed to anyone who
+  // asks, and there is no caller that needs it: the tag treats every non-200 the
+  // same way, by leaving the cookie alone.
+  if (!record) return false;
+
+  // A record with no allow-list configured echoes whatever asked, which is the
+  // same posture the loader takes for the bundle and rests on the same two
+  // unguessable secrets. Unchanged.
+  if (!record.domains || !record.domains.length) return true;
 
   try {
     hostname = new URL(origin).hostname;
@@ -393,8 +404,13 @@ function audienceOk(request, record, payload) {
   return audienceJson(request, record, 200, payload, 'private, max-age=300');
 }
 
-function audienceError(request, status, code) {
-  return audienceJson(request, null, status, { v: 1, error: code }, 'no-store');
+// The record is passed where there is one, which is the two refusals that happen
+// after the client resolves: audiences not enabled, and the namespace erroring.
+// A client debugging their own integration should be able to read those from
+// their own page. Everything before that point has no record and gets no
+// allow-origin header at all.
+function audienceError(request, status, code, record) {
+  return audienceJson(request, record || null, status, { v: 1, error: code }, 'no-store');
 }
 
 // Everything a hand-edited or half-written record can be, resolved to something
@@ -436,12 +452,12 @@ async function serveAudience(request, env, record, key, conversioId) {
   // this client has audiences, which for most of them is not true.
   if (record.audiences !== true) {
     log('audiences_not_enabled', { key: fingerprint(key), client: record.client });
-    return audienceError(request, 404, 'not_enabled');
+    return audienceError(request, 404, 'not_enabled', record);
   }
 
   if (!env.AUDIENCES) {
     log('audiences_unbound', { key: fingerprint(key) });
-    return audienceError(request, 503, 'unavailable');
+    return audienceError(request, 503, 'unavailable', record);
   }
 
   // Namespaced by client key, so one client's key cannot read another's
@@ -450,7 +466,7 @@ async function serveAudience(request, env, record, key, conversioId) {
     stored = await env.AUDIENCES.get('aud:' + key + ':' + conversioId, { type: 'json' });
   } catch (e) {
     log('audience_lookup_error', { key: fingerprint(key) });
-    return audienceError(request, 503, 'unavailable');
+    return audienceError(request, 503, 'unavailable', record);
   }
 
   return audienceOk(request, record, normaliseAudience(stored));

@@ -202,6 +202,39 @@ async function main() {
   check('a request with no Origin still answers', r.res.status === 200);
   check('and carries no allow-origin header', !r.res.headers.get('access-control-allow-origin'));
 
+  // 8b. a refusal reached before the client resolves is not readable
+  //     cross-origin. The body says nothing worth having, but there is no
+  //     caller that needs it either: the tag treats every non-200 identically,
+  //     by leaving the cookie alone.
+  var hostile = "https://evil.example";
+  var refusals = [
+    ["an unknown key", null, {}],
+    ["a revoked client", audienceRecord({ status: "revoked" }), {}],
+    ["a malformed id", audienceRecord(), { id: "nope" }],
+    ["a rate limit", audienceRecord(), { rateLimited: true }],
+    ["a disallowed origin", audienceRecord({ domains: ["acme.com"] }), {}]
+  ];
+  for (i = 0; i < refusals.length; i++) {
+    r = await get(loader, refusals[i][1], Object.assign({ origin: hostile }, refusals[i][2]));
+    check(refusals[i][0] + " is not readable cross-origin",
+      !r.res.headers.get("access-control-allow-origin"),
+      r.res.headers.get("access-control-allow-origin"));
+  }
+
+  // But a client debugging their own integration must be able to read the two
+  // refusals that happen after their key resolves.
+  r = await get(loader, activeRecord({ domains: ["acme.com"] }), { origin: SITE });
+  check("not_enabled IS readable from the client own site",
+    r.res.headers.get("access-control-allow-origin") === SITE,
+    r.res.headers.get("access-control-allow-origin"));
+  r = await get(loader, audienceRecord({ domains: ["acme.com"] }), { origin: SITE, audiencesUnbound: true });
+  check("and so is a namespace outage",
+    r.res.headers.get("access-control-allow-origin") === SITE,
+    r.res.headers.get("access-control-allow-origin"));
+  r = await get(loader, activeRecord({ domains: ["acme.com"] }), { origin: hostile });
+  check("but not_enabled is still not readable from elsewhere",
+    !r.res.headers.get("access-control-allow-origin"));
+
   // 9. a hand-edited record cannot reach the cookie. The comma is the one that
   //    matters: a code containing one splits into two inside the cookie value.
   var hostile = {};
