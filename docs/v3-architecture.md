@@ -6,8 +6,7 @@ Written from the end state backwards.
 An earlier assessment worked forwards from the existing tag instead, asking how
 to make a GTM-delivered lookup fast enough to beat first paint. That question has
 no answer (§2.1), so it was discarded rather than patched, along with the tag
-instrumentation built to measure it. Both survive on the `tag-3.1-abandoned`
-branch if the reasoning is ever wanted.
+instrumentation built to measure it.
 
 Scope confirmed with Andy, September 2026:
 
