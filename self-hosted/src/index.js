@@ -46,6 +46,23 @@ var TRACKING_ID_SLOT = '@@CONVERSIO_TRACKING_ID@@';
 // value was ever validated. Anything failing it is dropped, not injected.
 var TRACKING_ID_SAFE = /^[A-Za-z0-9_-]{1,64}$/;
 
+// The slot the client's deployment date is patched into. Must stay in step with
+// DEPLOYED_AT_SLOT in the runtime tag.
+var DEPLOYED_AT_SLOT = '@@CONVERSIO_DEPLOYED_AT@@';
+
+// Tighter than injection safety alone needs, since digits and hyphens could not
+// break out of a string literal whatever their arrangement. The extra strictness
+// is about the value being client-facing: this is published to a client as the
+// date their site changed, and "2026-13-45" reaching a page would discredit the
+// field far more cheaply than it would break anything. Month and day ranges are
+// checked, the length of February is not: that is the point of diminishing
+// returns for a value manage-keys.mjs generates from the clock anyway.
+//
+// manage-keys.mjs writes this field, so a record that came through the CLI is
+// already well formed. This is here for the one that did not, a record
+// hand-edited in the Cloudflare dashboard having passed through no check at all.
+var DEPLOYED_AT_SAFE = /^[0-9]{4}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12][0-9]|3[01])$/;
+
 // The slot the tag reads its audience endpoint from. Must stay in step with
 // AUDIENCE_ENDPOINT_SLOT in the runtime tag.
 //
@@ -177,6 +194,19 @@ function safeTrackingId(raw, key) {
   return raw;
 }
 
+// Dropped rather than passed through when it fails, exactly as a bad tracking ID
+// is. The tag reads an empty slot as "not configured" and reports null, which is
+// the honest answer: a client whose record carries a malformed date is better
+// told we cannot say than shown a date nobody should believe.
+function safeDeployedAt(raw, key) {
+  if (!raw) return '';
+  if (typeof raw !== 'string' || !DEPLOYED_AT_SAFE.test(raw)) {
+    log('deployed_at_rejected', { key: fingerprint(key) });
+    return '';
+  }
+  return raw;
+}
+
 // Everything between having a key and knowing the client may be served.
 // Shared by both routes, returning the record or a reason rather than a
 // response, because the two answer a refusal differently: one with a JavaScript
@@ -294,6 +324,7 @@ async function serveBundle(request, env, record, key) {
   // in the tag. Bundles predating the slot simply contain nothing to replace.
   body = body.split(TRACKING_ID_SLOT).join(safeTrackingId(record.trackingId, key));
   body = body.split(AUDIENCE_ENDPOINT_SLOT).join(audienceEndpoint(request, record, key));
+  body = body.split(DEPLOYED_AT_SLOT).join(safeDeployedAt(record.deployedAt, key));
 
   return new Response(body, {
     status: 200,

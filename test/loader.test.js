@@ -1,6 +1,7 @@
 // Checks for the self-hosted loader Worker (self-hosted/src/index.js): the
-// access-control decisions, and the one place it rewrites the bundle it serves
-// (patching in the client's tracking ID from their KV record).
+// access-control decisions, and the three places it rewrites the bundle it
+// serves (the client's tracking ID and deployment date, both copied from their
+// KV record, and the audience endpoint, which is built from the request).
 //
 // The Worker is exercised directly with a stubbed env, and the bytes it
 // returns for a real client are then run through the browser harness, so the
@@ -147,6 +148,69 @@ async function main() {
     xhr: { body: { v: 1, ts: 1790164370, a: ['lapsed_90d'] } } });
   check('a client without audiences makes no request whatever the network would say',
     offRun.xhrRequests.length === 0);
+
+  // 2c. the deployment date, the third thing patched at serve time. Copied
+  //     from the record like the tracking ID, but published to the client as a
+  //     statement about when we changed their site, which is what makes a wrong
+  //     one worse than a missing one.
+  var depRes = await get(loader, activeRecord({ deployedAt: '2026-10-07' }));
+  var depBody = await depRes.text();
+  check('deployment date: placeholder substituted',
+    depBody.indexOf('@@CONVERSIO_DEPLOYED_AT@@') === -1, 'placeholder still present');
+
+  var depRun = runTag({ tagPath: SERVED_LABEL, tagSource: depBody, cwv: 'ok', emissionEnabled: true });
+  check('tag reads the injected deployment date',
+    depRun.window.conversioSettings.deployedAt === '2026-10-07',
+    JSON.stringify(depRun.window.conversioSettings));
+
+  // A record predating the field, which every key issued before 2.6.4 is. The
+  // slot is still substituted, so the placeholder never ships, and the tag
+  // reports null rather than a date nobody recorded.
+  check('no deployment date: placeholder still substituted',
+    noneBody.indexOf('@@CONVERSIO_DEPLOYED_AT@@') === -1, 'placeholder still present');
+  check('no deployment date: tag reads null',
+    noneRun.window.conversioSettings.deployedAt === null,
+    JSON.stringify(noneRun.window.conversioSettings));
+
+  // The same boundary section 3 draws for the tracking ID. A hand-edited record
+  // reaches this with nothing having checked it, and the value lands in a JS
+  // string literal that runs on every page of the client's site. The date cases
+  // below are not injection attempts: they are the likelier failure, a
+  // plausible-looking value that is not a date, which must be refused rather
+  // than published to a client as the day their site changed.
+  var badDates = [
+    "' ; fetch('//evil.example/') ; '",
+    '2026-13-01',
+    '2026-00-10',
+    '2026-10-32',
+    '2026-10-00',
+    '07-10-2026',
+    '2026-10-07T12:00:00Z',
+    'yesterday',
+    20261007,
+    { when: '2026-10-07' }
+  ];
+
+  for (var d = 0; d < badDates.length; d++) {
+    var bRes = await get(loader, activeRecord({ deployedAt: badDates[d] }));
+    var bBody = await bRes.text();
+    check('bad deployedAt #' + (d + 1) + ' is not injected',
+      bBody.indexOf('evil.example') === -1 &&
+      bBody.indexOf(String(badDates[d])) === -1,
+      JSON.stringify(badDates[d]));
+    check('bad deployedAt #' + (d + 1) + ' leaves a usable tag reporting null',
+      bBody.indexOf('@@CONVERSIO_DEPLOYED_AT@@') === -1 &&
+      runTag({ tagPath: SERVED_LABEL, tagSource: bBody, cwv: 'ok', emissionEnabled: true })
+        .window.conversioSettings.deployedAt === null,
+      JSON.stringify(badDates[d]));
+  }
+
+  // The release date is a constant in the bundle rather than anything the
+  // Worker touches, so it must come through untouched for every client above.
+  check('the release date is served unmodified',
+    depBody.indexOf("VERSION_RELEASED = '2026-10-09'") !== -1 &&
+    noneBody.indexOf("VERSION_RELEASED = '2026-10-09'") !== -1,
+    'release date missing or rewritten');
 
   // 3. the security boundary: a record edited straight into KV never passed
   //    through the CLI's validation, and this value lands inside a JS string

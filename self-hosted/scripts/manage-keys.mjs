@@ -6,7 +6,7 @@
 //   node manage-keys.mjs issue --client "Acme Co" [--version 2.2] [--domains acme.com,www.acme.com] [--tracking-id G-XXXXXXXXXX]
 //   node manage-keys.mjs revoke <key>
 //   node manage-keys.mjs activate <key>
-//   node manage-keys.mjs update <key> [--client ...] [--version ...] [--domains ...] [--tracking-id ...] [--audiences true|false]
+//   node manage-keys.mjs update <key> [--client ...] [--version ...] [--domains ...] [--tracking-id ...] [--audiences true|false] [--deployed-at YYYY-MM-DD]
 //   node manage-keys.mjs verify <key>
 //   node manage-keys.mjs show <key>
 //   node manage-keys.mjs list
@@ -147,6 +147,18 @@ function checkVersion(raw) {
 // client is actually being served rather than what KV claims.
 const SERVED_TRACKING_ID = /TRACKING_ID_SLOT\s*=\s*'([^']*)'/;
 
+// The same, for the two provenance fields 2.6.4 adds. One is a constant in the
+// bundle and one is substituted per client, and both are read out of the served
+// bytes rather than out of KV for the same reason the tracking ID is: what a
+// client can see is what is being served, not what we meant to serve.
+const SERVED_VERSION_RELEASED = /VERSION_RELEASED\s*=\s*'([^']*)'/;
+const SERVED_DEPLOYED_AT = /DEPLOYED_AT_SLOT\s*=\s*'([^']*)'/;
+
+// Pulled off the bundle's own header line, so the version can be compared
+// against what KV claims. A disagreement here is the edge cache still holding
+// the previous bundle, which is exactly what someone runs this to find out.
+const SERVED_VERSION = /version\s+([0-9]+(?:\.[0-9]+){1,3})\b/;
+
 // Whether this client has audiences, which gates the /a/ route on the Worker.
 // Deliberately strict rather than truthy: the only useful default would be "on",
 // and a typo read as consent to serve visitor-level data is the wrong way round
@@ -161,6 +173,37 @@ function normaliseAudiences(raw) {
   if (AUDIENCES_OFF.indexOf(value) !== -1) return false;
   console.error(`Invalid --audiences "${raw}". Expected one of: ${AUDIENCES_ON.concat(AUDIENCES_OFF.filter(Boolean)).join(', ')}.`);
   process.exit(1);
+}
+
+// The date a client's key was last pointed at a new version, which the tag
+// publishes to them as window.conversioSettings.deployedAt. Taken from the clock
+// at the moment the version changes rather than from anything typed, because the
+// one thing it has to be is a record of what happened rather than a record of
+// what someone meant to happen.
+//
+// UTC via toISOString, deliberately. A local-time date would be a different day
+// for whoever runs this from a different timezone, and the field's whole value
+// is that two people reading it agree on what it says.
+function today() {
+  return new Date().toISOString().slice(0, 10);
+}
+
+// Matches DEPLOYED_AT_SAFE in src/index.js. A date the Worker would refuse is
+// worth refusing here too: written to KV it would simply vanish from the served
+// bundle later, which is a confusing way to find out about a typo.
+const DEPLOYED_AT_PATTERN = /^[0-9]{4}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12][0-9]|3[01])$/;
+
+// Only reached via an explicit --deployed-at, which exists to correct a date
+// rather than to set one routinely. Routine use is the automatic path in
+// cmdUpdate: a flag is how you fix a record, not how you record a deployment.
+function normaliseDeployedAt(raw) {
+  const value = (raw || '').trim();
+  if (!value) return null;
+  if (!DEPLOYED_AT_PATTERN.test(value)) {
+    console.error(`Invalid --deployed-at "${raw.trim()}". Expected an ISO 8601 date, e.g. 2026-10-09.`);
+    process.exit(1);
+  }
+  return value;
 }
 
 function normaliseTrackingId(raw) {
@@ -296,7 +339,12 @@ function cmdIssue(argv) {
   const record = {
     status: 'active',
     client: flags.client,
-    version: version
+    version: version,
+    // A key that did not exist a moment ago is being deployed now, so there is
+    // nothing to ask anyone and no --deployed-at on this command. A date that
+    // needs correcting afterwards (a client moved onto a new key, carrying a
+    // history this key does not have) is what `update --deployed-at` is for.
+    deployedAt: today()
   };
   if (flags.domains) {
     record.domains = flags.domains.split(',').map((d) => d.trim()).filter(Boolean);
@@ -363,9 +411,18 @@ async function cmdUpdate(argv) {
   // whether the flag was passed at all, which is why both are read here.
   const trackingId = 'tracking-id' in flags ? normaliseTrackingId(flags['tracking-id']) : null;
   const audiences = 'audiences' in flags ? normaliseAudiences(flags.audiences) : null;
+  const deployedAt = 'deployed-at' in flags ? normaliseDeployedAt(flags['deployed-at']) : null;
 
   const record = kvGet(key);
   if (!record) { console.error('No record found for that key'); process.exit(1); }
+
+  // Read before the assignment below, because what makes this a deployment is
+  // that the version CHANGED. Re-asserting the version a key already has serves
+  // the client the same bytes they were already being served, so it is not a
+  // deployment and must not move the date: otherwise a no-op update would read
+  // to that client as an unannounced change to their site, which is the exact
+  // thing the field exists to let them rule out.
+  const versionChanged = version !== null && version !== record.version;
 
   if (flags.client) record.client = flags.client;
   if (version) record.version = version;
@@ -381,8 +438,23 @@ async function cmdUpdate(argv) {
     else delete record.audiences;
   }
 
+  // From the clock, not from the command line, so the date records when the
+  // change was actually made.
+  if (versionChanged) record.deployedAt = today();
+
+  // Applied after the automatic one, so an explicit date wins. This is the
+  // correction path: backfilling a record that predates the field, or fixing a
+  // date set by a change that turned out not to reach the client.
+  if ('deployed-at' in flags) {
+    if (deployedAt) record.deployedAt = deployedAt;
+    else delete record.deployedAt;
+  }
+
   kvPut(key, record);
   console.log('Updated key for', record.client);
+  if (versionChanged && !('deployed-at' in flags)) {
+    console.log(`(version changed, so deployedAt is now ${record.deployedAt})`);
+  }
   console.log(JSON.stringify(record, null, 2));
   await purgeUrl(key);
 }
@@ -412,7 +484,9 @@ function cmdList() {
     // an open one, and the two fail in completely different ways.
     const bits = [
       record.status,
-      'v' + (record.version || 'default'),
+      // Attached to the version rather than listed as its own field, since it
+      // is the date that version arrived and reads as nonsense apart from it.
+      'v' + (record.version || 'default') + (record.deployedAt ? ' since ' + record.deployedAt : ''),
       record.trackingId || 'no tracking id',
       record.audiences === true ? 'audiences' : 'no audiences',
       // Space-separated, inside a line whose other fields are comma-separated,
@@ -482,6 +556,41 @@ async function cmdVerify(argv) {
       console.log('Tracking ID: none configured (window.conversioSettings.trackingId will be null)');
     } else {
       console.log(`Tracking ID: ${served[1]}`);
+    }
+
+    const released = body.match(SERVED_VERSION_RELEASED);
+    const deployed = body.match(SERVED_DEPLOYED_AT);
+
+    if (!released && !deployed) {
+      console.log('Provenance: not supported by this bundle version (2.6.4 and later)');
+    } else {
+      console.log(`Version released: ${released ? released[1] : 'not in this bundle'}`);
+      if (!deployed) {
+        console.log('Deployed to this client: not supported by this bundle version');
+      } else if (!deployed[1]) {
+        console.log('Deployed to this client: not recorded (window.conversioSettings.deployedAt will be null)');
+      } else {
+        console.log(`Deployed to this client: ${deployed[1]}`);
+      }
+    }
+
+    // The record was read for the Referer anyway, so comparing it against the
+    // served bytes costs nothing and catches the one thing this command exists
+    // for: a change written to KV that the edge is not serving yet. Reported as
+    // a disagreement rather than a failure, because both halves are working
+    // exactly as designed and the answer is usually to wait or purge.
+    if (record) {
+      const servedVersion = (((body.split('\n')[0]).match(SERVED_VERSION)) || [])[1];
+      if (record.version && servedVersion && servedVersion !== record.version) {
+        console.log('');
+        console.log(`STALE - KV says v${record.version} but the edge is serving v${servedVersion}.`);
+        console.log('The edge cache has not expired yet. Wait out the TTL or set CF_API_TOKEN');
+        console.log('and CF_ZONE_ID so revoke/activate/update purge it (see README).');
+      } else if (record.deployedAt && deployed && deployed[1] && deployed[1] !== record.deployedAt) {
+        console.log('');
+        console.log(`STALE - KV says deployed ${record.deployedAt}, the edge is serving ${deployed[1]}.`);
+        console.log('Same cause as a version mismatch: the edge cache has not caught up.');
+      }
     }
     return;
   }

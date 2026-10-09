@@ -1,9 +1,11 @@
-// CONVERSIO TAG | Runtime bundle : version 3.0 - updated 23-09-2026
+// CONVERSIO TAG | Runtime bundle : version 3.0 - updated 09-10-2026
 // Copyright Conversio Ltd. 2026 - Use permitted only under licence.
 (function () {
   'use strict';
 
   var TAG_VERSION = '3.0';
+
+  var VERSION_RELEASED = '2026-10-09';
 
   var INIT_KEY = '__CONVERSIO_RUNTIME_INIT__';
 
@@ -97,6 +99,8 @@
 
   var TRACKING_ID_SLOT          = '@@CONVERSIO_TRACKING_ID@@';
 
+  var DEPLOYED_AT_SLOT          = '@@CONVERSIO_DEPLOYED_AT@@';
+
   var dl = window.dataLayer = window.dataLayer || [];
 
   var conversioIdCache = null;
@@ -174,6 +178,11 @@
     return TRACKING_ID_SLOT.trim() || null;
   }
 
+  function readDeployedAt() {
+    if (DEPLOYED_AT_SLOT.indexOf('@@') !== -1) return null;
+    return DEPLOYED_AT_SLOT.trim() || null;
+  }
+
   function exposeClientSettings() {
     var settings;
     try {
@@ -181,6 +190,8 @@
       if (!isObject(settings)) settings = window.conversioSettings = {};
       settings.trackingId = readTrackingId();
       settings.version = TAG_VERSION;
+      settings.versionReleased = VERSION_RELEASED;
+      settings.deployedAt = readDeployedAt();
     } catch (e) {
     }
   }

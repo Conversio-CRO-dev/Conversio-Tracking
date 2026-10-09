@@ -230,6 +230,12 @@ Optional flags:
 - `--tracking-id G-J4EDMZMNY9` sets the client's GA property ID, readable by
   the tag as `window.conversioSettings.trackingId`. See
   [Client-level settings](#client-level-settings).
+- `--deployed-at 2026-10-09` (on `update` only) corrects the date this client
+  was moved to their current version. You should rarely need it: `issue` stamps
+  a new key with today's date, and `update --version` re-stamps it whenever the
+  version actually changes. It is for backfilling a record that predates the
+  field, or fixing a date set by a change that turned out not to reach the
+  client. `--deployed-at ""` clears it, which reads as "we cannot say".
 
 This prints the exact `<script>` tag to hand to the client for their GTM
 Custom HTML tag.
@@ -264,9 +270,14 @@ One line per key, with the fields a rollout or an outage is usually diagnosed
 from:
 
 ```
-cvo_xxxxxxxxxxxxxxxxxxxxxxxx -> Acme Co (active, v2.6.3, G-XXXXXXXXXX, no audiences, locked to acme.com www.acme.com)
+cvo_xxxxxxxxxxxxxxxxxxxxxxxx -> Acme Co (active, v2.6.4 since 2026-10-09, G-XXXXXXXXXX, no audiences, locked to acme.com www.acme.com)
 cvo_yyyyyyyyyyyyyyyyyyyyyyyy -> Other Co (active, v2.6.3, G-YYYYYYYYYY, no audiences, any domain)
 ```
+
+`since` is the date that client was moved to the version beside it, which is
+also what the tag publishes to them as `window.conversioSettings.deployedAt`. A
+key with no date is one issued before the field existed; `update --version` will
+stamp it on the next real version change.
 
 The last field is the domain lock, and it is worth reading before concluding a
 key is broken: `any domain` means no `--domains` is set, anything else is the
@@ -297,9 +308,17 @@ from:
 
 ```
 Testing from https://acme.com/ (domain-locked to acme.com, www.acme.com)
-OK - serving the runtime bundle (CONVERSIO TAG | Runtime bundle : version 2.6.3 ...)
+OK - serving the runtime bundle (CONVERSIO TAG | Runtime bundle : version 2.6.4 ...)
 Tracking ID: G-XXXXXXXXXX
+Version released: 2026-10-09
+Deployed to this client: 2026-10-09
 ```
+
+The last two come from the served bytes rather than from KV, which is the whole
+point of the command: they are what the client's browser will actually read. If
+they disagree with the record, `verify` says so and names both, which is almost
+always the edge cache not having expired yet. A bundle older than 2.6.4 has no
+such fields and reports `Provenance: not supported by this bundle version`.
 
 Without that, a plain request carries no `Origin` and no `Referer`, the Worker
 has no hostname to match, and every domain-locked key reports `NOT SERVING` in
@@ -312,8 +331,9 @@ disagrees with the edge still shows up as that disagreement.
 ## Client-level settings
 
 Some values belong to the client rather than the visitor. Today that's the
-tracking ID (a GA property ID); the mechanism generalises to anything else
-that needs setting once per client.
+tracking ID (a GA property ID) and, from 2.6.4, the date that client was moved
+to their current version; the mechanism generalises to anything else that needs
+setting once per client.
 
 It lives in the client's KV record and is patched into the bundle at serve
 time, so the tag can read it without a second network request:
@@ -336,6 +356,29 @@ Inside the tag and for any tag that runs after it, the value is on a global:
 ```js
 window.conversioSettings.trackingId  // 'G-J4EDMZMNY9', or null if not set
 ```
+
+### The deployment date
+
+From 2.6.4 the same mechanism carries a second per-client value, beside two
+constants baked into the bundle:
+
+```js
+window.conversioSettings.version         // '2.6.4'        constant in the bundle
+window.conversioSettings.versionReleased // '2026-10-09'   constant in the bundle
+window.conversioSettings.deployedAt      // '2026-10-07'   from this client's KV record
+```
+
+Nothing to set by hand in the normal case. `issue` stamps a new key with today's
+date, and `update --version` re-stamps it whenever the version actually changes.
+Re-asserting a version a key already has does not move it, because the client is
+being served the same bytes and nothing was deployed.
+
+The Worker checks the value on the way out and drops anything that is not an
+ISO 8601 date, logging `deployed_at_rejected`. The tag then reports `null`, which
+reads as "we cannot say". That is the right failure: a client is told a date is
+the day their site changed, so a wrong one is worse than a missing one. See
+[Which version is running, and since when](../README.md#which-version-is-running-and-since-when-264)
+for what to tell a client it does and does not prove.
 
 ### What the tag does with it
 
