@@ -405,22 +405,67 @@ function cmdList() {
     if (!record) { console.log(name, '-> unreadable'); continue; }
     // Version and tracking ID inline: during a staged rollout the thing you
     // need to see at a glance is which clients have moved and which have not.
+    //
+    // The domain lock is on this line because it is the field most likely to
+    // explain a key that reads as healthy here but is refused at the edge.
+    // Without it, nothing in this output tells a domain-locked key apart from
+    // an open one, and the two fail in completely different ways.
     const bits = [
       record.status,
       'v' + (record.version || 'default'),
       record.trackingId || 'no tracking id',
-      record.audiences === true ? 'audiences' : 'no audiences'
+      record.audiences === true ? 'audiences' : 'no audiences',
+      // Space-separated, inside a line whose other fields are comma-separated,
+      // so a multi-domain lock stays one readable field rather than reading as
+      // several more bits.
+      record.domains && record.domains.length
+        ? 'locked to ' + record.domains.join(' ')
+        : 'any domain'
     ];
     console.log(name, '->', `${record.client} (${bits.join(', ')})`);
   }
 }
 
+// The record is read before the fetch, purely to work out what to send as a
+// Referer. A bare fetch sends neither Origin nor Referer, the Worker has no
+// hostname to place the request against, and a domain-locked key is refused as
+// domain_mismatch: a clean 200 carrying the inactive stub, byte-identical to
+// what a revoked key gets. So this check used to report NOT SERVING for a
+// perfectly healthy client, in exactly the words it uses for a dead one, which
+// is worse than not running it: the one command that is supposed to tell those
+// two apart could not.
+//
+// KV is consulted for the Referer and nothing else. What is being served is
+// still read entirely out of the response bytes, so a record that disagrees
+// with the edge still shows up as the disagreement it is.
 async function cmdVerify(argv) {
   const key = argv[0];
   if (!key) { console.error('Usage: verify <key>'); process.exit(1); }
 
+  const record = kvGet(key);
+  const domains = (record && record.domains) || [];
+  const headers = {};
+
+  // domains[0] rather than all of them: the Worker allows a request matching
+  // any one entry, so one is enough to clear the lock. It is named in the
+  // output because which origin this was tested from changes what the result
+  // means.
+  if (domains.length) {
+    headers.Referer = `https://${domains[0]}/`;
+    console.log(`Testing from ${headers.Referer} (domain-locked to ${domains.join(', ')})`);
+  } else if (record) {
+    console.log('Testing with no Referer (this key is not domain-locked, so any origin is allowed)');
+  } else {
+    // Still worth running: the fetch is the part that proves what the edge
+    // serves, and it does not depend on KV being readable. But a domain-locked
+    // key cannot be tested properly from here, and silently reporting NOT
+    // SERVING is the exact failure this change exists to remove.
+    console.log('Could not read this key from KV, so testing with no Referer.');
+    console.log('If it is domain-locked, that alone reports NOT SERVING below even when it is healthy.');
+  }
+
   const url = `${loaderOrigin()}/t/${key}.js`;
-  const res = await fetch(url);
+  const res = await fetch(url, { headers });
   const body = await res.text();
 
   if (res.status === 200 && body.startsWith('// CONVERSIO TAG')) {
@@ -447,7 +492,23 @@ async function cmdVerify(argv) {
   }
 
   console.log(`NOT SERVING - status ${res.status}, body: ${body.trim()}`);
-  console.log('Check the key exists, is active, and (if domain-locked) that you are testing from an allowed origin.');
+
+  // Advice that depends on what was actually tested, rather than one line
+  // listing every cause. An origin mismatch has already been ruled out when a
+  // Referer went with the request, so repeating it there just buries the
+  // causes that are still live.
+  if (domains.length) {
+    console.log(`Tested from ${headers.Referer}, built from this key's own domain list, so an`);
+    console.log('origin mismatch only explains this if a stored domain is malformed:');
+    console.log(`  ${domains.join(', ')}`);
+    console.log('Otherwise check the status is active and the version names a deployed bundle.');
+  } else if (record) {
+    console.log('This key is not domain-locked, so check the status is active and that its');
+    console.log('version names a bundle that is actually deployed.');
+  } else {
+    console.log('No record was readable: check the key exists and that you are pointed at the');
+    console.log('right environment, then re-run so a domain lock can be tested properly.');
+  }
 }
 
 const [command, ...rest] = ARGV;

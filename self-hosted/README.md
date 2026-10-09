@@ -260,6 +260,19 @@ Same key, same `<script>` tag, no changes needed on their end.
 node scripts/manage-keys.mjs list
 ```
 
+One line per key, with the fields a rollout or an outage is usually diagnosed
+from:
+
+```
+cvo_xxxxxxxxxxxxxxxxxxxxxxxx -> Acme Co (active, v2.6.3, G-XXXXXXXXXX, no audiences, locked to acme.com www.acme.com)
+cvo_yyyyyyyyyyyyyyyyyyyyyyyy -> Other Co (active, v2.6.3, G-YYYYYYYYYY, no audiences, any domain)
+```
+
+The last field is the domain lock, and it is worth reading before concluding a
+key is broken: `any domain` means no `--domains` is set, anything else is the
+list a request's `Referer` has to match. A domain-locked key refuses anything
+it does not recognise with the same inactive stub a revoked key gets.
+
 ### Check a single client's record
 
 ```bash
@@ -277,6 +290,22 @@ bundle, the harmless inactive response, or rate limited, and which tracking
 ID (if any) is in the bytes actually being served. Useful before handing a new
 `<script>` tag to a client, or right after a revoke/activate/update, to
 confirm the change actually took effect rather than trusting the cache timing.
+
+It reads the key's record first and, if the key is domain-locked, sends a
+`Referer` from that record's own domain list, then prints the origin it tested
+from:
+
+```
+Testing from https://acme.com/ (domain-locked to acme.com, www.acme.com)
+OK - serving the runtime bundle (CONVERSIO TAG | Runtime bundle : version 2.6.3 ...)
+Tracking ID: G-XXXXXXXXXX
+```
+
+Without that, a plain request carries no `Origin` and no `Referer`, the Worker
+has no hostname to match, and every domain-locked key reports `NOT SERVING` in
+the same words as a genuinely dead one. KV is read only to decide the `Referer`;
+what is being served is still read out of the response bytes, so a record that
+disagrees with the edge still shows up as that disagreement.
 
 ---
 
