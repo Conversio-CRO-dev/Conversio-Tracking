@@ -931,9 +931,7 @@ the edge compresses it, which matters more than it looks because the 5 minute
 cache TTL below has an active visitor re-fetching it regularly.
 
 The readable file stays the source of truth: edit that, never the bundle, and
-rebuild. `--check` exits non-zero if the committed bundle is stale, and
-`.github/workflows/ci.yml` runs it on every pull request for each version whose
-GTM file defines `TAG_VERSION` (2.6.4 on).
+rebuild. `--check` exits non-zero if the committed bundle is stale, for CI.
 Nothing is mangled or reflowed, so what a client's devtools shows is still
 followable code with the same identifiers, one statement per line and the
 original indentation. Line numbers shift, since the comment lines are gone, so

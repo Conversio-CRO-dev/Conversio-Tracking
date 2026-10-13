@@ -22,14 +22,9 @@ plus the tooling around it.
   cd self-hosted && node scripts/build-bundle.mjs 2.6.2
   ```
 
-  `--check` instead exits non-zero if the committed bundle is stale, and
-  `.github/workflows/ci.yml` runs it on every pull request alongside the test
-  suites. It can only check a version whose GTM file defines `TAG_VERSION`,
-  which means 2.6.4 on: build-bundle derives the released date from the header
-  and requires the two to agree, so an earlier bundle fails the check for want
-  of that constant rather than for being stale. Those versions are frozen
-  anyway. Bundles up to 2.4 predate the build step entirely and are left as they
-  were, comments included.
+  `--check` instead exits non-zero if the committed bundle is stale, so it can
+  be wired into CI alongside the test suites. Bundles up to 2.4 predate this and
+  are left as they were, comments included.
 - `test/` - a behavioural test suite for the runtime tag (below).
 
 ## Trigger events
@@ -562,10 +557,7 @@ actually reading it back:
 node test/loader.test.js
 ```
 
-Both exit non-zero if anything fails, and `.github/workflows/ci.yml` runs every
-suite in `test/` on each pull request, discovering them by glob so a new one is
-picked up without the workflow being edited. A suite that fails doesn't stop the
-others, so a run reports all of them at once. Earlier
+Both exit non-zero if anything fails, so they're safe to wire into CI. Earlier
 versions keep their own suites (`test/runtime-tag-2.6.4.test.js`,
 `test/runtime-tag-2.6.3.test.js`,
 `test/runtime-tag-2.6.2.test.js`,
