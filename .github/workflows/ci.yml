@@ -23,11 +23,14 @@ jobs:
   test:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      # v5 rather than v4 on both: v4 targets Node 20, which is deprecated, so
+      # the runner forces it onto Node 24 and annotates every run saying so.
+      # Both of these are node24 actions, which is the thing that matters here.
+      - uses: actions/checkout@v5
 
       # No package.json, no dependencies: the suites are plain node scripts and
       # the tag itself is dependency-free by design. Nothing to install.
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
           node-version: '22'
 
