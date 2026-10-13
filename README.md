@@ -348,19 +348,54 @@ names.
 
 ---
 
-## Which version is running (3.0)
+## Which version is running, and since when (2.6.4)
 
 ```js
-window.conversioSettings.version        // '3.0'
-window.conversioSettings.blockedVersions // ['3.0'] if a second copy stood down
+window.conversioSettings.version         // '2.6.4'
+window.conversioSettings.versionReleased // '2026-10-09', when that version was cut
+window.conversioSettings.deployedAt      // '2026-10-07', when THIS client got it
+window.conversioSettings.blockedVersions // ['3.0'] if a second copy stood down (3.0 only)
 ```
 
-The first is the first thing to ask on a page where the tag is not doing what a
+`version` is the first thing to ask on a page where the tag is not doing what a
 version's notes say it should. It comes from a constant in the file rather than
 anything the loader substitutes, so it answers for the pasted-inline copy too,
 and `build-bundle.mjs` refuses to build a bundle whose constant and header
 disagree. A version marker that lies is worse than none, being read at exactly
 the moment someone has stopped trusting what they can see.
+
+`versionReleased` and `deployedAt` are the two dates, and the difference between
+them is the point. The first is a constant in the bundle and identical for every
+client: when we cut that release. The second is substituted per client from
+their KV record, and is set automatically whenever `manage-keys.mjs update`
+moves that client to a different version: when **their** site changed. ISO 8601
+in both cases, deliberately, since these are read by clients and `09-10` should
+not need a footnote.
+
+Re-asserting a version a key already has does not move `deployedAt`. The client
+is served the same bytes they were already being served, so nothing was
+deployed, and a no-op update that moved the date would read to them as an
+unannounced change: the one thing the field exists to let them rule out.
+
+### What this is and is not
+
+It makes an unannounced change **visible**. Nothing on the page previously
+distinguished one version from another, so a client had no way to tell when
+their tag last changed, and neither did we without reading KV.
+
+It is **not proof**. We control the values and the serving, so none of this
+survives an assumption that we are lying. What converts it into something worth
+having is that the client can read these fields on every page load and record
+them in their own GA4 or dataLayer. That record is theirs, not ours, and a
+change outside an agreed window then shows up as a date in their own analytics.
+Worth pitching to a client that way round rather than as "the tag tells you when
+we deployed".
+
+A `deployedAt` of `null` means we cannot say, and is never dressed up as
+anything else. Two real cases produce it: the GTM paste-in copy of the tag,
+which no loader ever rewrites, and a client whose KV record predates the field.
+A third is a record carrying a date the Worker refused as malformed, which it
+drops rather than publishing (`deployed_at_rejected` in the logs).
 
 The second exists because of a real morning lost to it. **Two Conversio tags on
 one page is a normal state while one version is being tested against another**,
@@ -523,7 +558,8 @@ node test/loader.test.js
 ```
 
 Both exit non-zero if anything fails, so they're safe to wire into CI. Earlier
-versions keep their own suites (`test/runtime-tag-2.6.3.test.js`,
+versions keep their own suites (`test/runtime-tag-2.6.4.test.js`,
+`test/runtime-tag-2.6.3.test.js`,
 `test/runtime-tag-2.6.2.test.js`,
 `test/runtime-tag-2.6.1.test.js`,
 `test/runtime-tag-2.6.test.js`,

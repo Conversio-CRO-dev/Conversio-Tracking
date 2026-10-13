@@ -50,7 +50,19 @@ const HEADER_TO = 'Runtime bundle';
 // Kept in step with the runtime tag and the loader. Only used as an invariant
 // here: however the comments come out, the loader must still find exactly what
 // it substitutes.
-const TRACKING_ID_SLOT = '@@CONVERSIO_TRACKING_ID@@';
+//
+// Every slot is listed, not just the tracking ID. A slot the stripper ate is
+// one the loader then cannot find, which means the placeholder ships to a
+// client's site verbatim, and each of these fails differently and silently:
+// an un-substituted tracking ID reads as an unconfigured client, an
+// un-substituted deployment date as a client we cannot date. A version that
+// has no such slot has none to lose and passes trivially, which is how the
+// pre-audience bundles go through this unchanged.
+const SLOTS = [
+  ['tracking ID', '@@CONVERSIO_TRACKING_ID@@'],
+  ['audience endpoint', '@@CONVERSIO_AUDIENCE_ENDPOINT@@'],
+  ['deployment date', '@@CONVERSIO_DEPLOYED_AT@@']
+];
 
 function fail(message) {
   console.error('build-bundle: ' + message);
@@ -213,14 +225,39 @@ function build(version) {
     fail(`TAG_VERSION does not say '${version}'. The header and the constant must agree.`);
   }
 
+  // The same contract for the release date, which the tag publishes on
+  // window.conversioSettings.versionReleased. The header carries it as
+  // DD-MM-YYYY for us; the constant carries it as ISO 8601 for clients, who
+  // should not have to guess whether 09-10 is October or September. Derived
+  // from the header here rather than trusted alongside it, so the two cannot
+  // drift: there is one date in this file and the build decides what it is.
+  //
+  // A date a client reads as the day we changed their site has to be right or
+  // not offered at all, and "the author edited the constant and forgot the
+  // header" is exactly the way it would go wrong.
+  const stamped = lines[1].match(/updated\s+(\d{2})-(\d{2})-(\d{4})\s*$/);
+  if (!stamped) {
+    fail(`the header carries no "updated DD-MM-YYYY" date: ${lines[1]}`);
+  }
+
+  const released = `${stamped[3]}-${stamped[2]}-${stamped[1]}`;
+  if (source.indexOf(`var VERSION_RELEASED = '${released}';`) === -1) {
+    fail(
+      `VERSION_RELEASED does not say '${released}', which is what the header's ` +
+      `"updated ${stamped[1]}-${stamped[2]}-${stamped[3]}" means in ISO 8601.`
+    );
+  }
+
   // Lines 2 and 3 of the GTM file: the version header, with the client slot
   // relabelled, and the copyright notice. The only comments the bundle keeps.
   const header = [lines[1].replace(HEADER_FROM, HEADER_TO), lines[2]];
   const body = lines.slice(3, closeIndex).join('\n');
   const output = header.join('\n') + '\n' + dropEmptiedLines(stripComments(body), body) + '\n';
 
-  if (occurrences(output, TRACKING_ID_SLOT) !== occurrences(source, TRACKING_ID_SLOT)) {
-    fail('the tracking ID slot did not survive comment removal intact');
+  for (const [label, slot] of SLOTS) {
+    if (occurrences(output, slot) !== occurrences(source, slot)) {
+      fail(`the ${label} slot did not survive comment removal intact`);
+    }
   }
 
   // Compiled, not run: a bundle that cannot parse would take out tracking on

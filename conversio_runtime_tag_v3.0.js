@@ -1,5 +1,5 @@
 //<script>
-// CONVERSIO TAG | Client: XXXXXX : version 3.0 - updated 23-09-2026
+// CONVERSIO TAG | Client: XXXXXX : version 3.0 - updated 09-10-2026
 // Copyright Conversio Ltd. 2026 - Use permitted only under licence.
 (function () {
   'use strict';
@@ -8,6 +8,16 @@
   // build-bundle.mjs, which refuses to build a bundle whose constant and header
   // disagree, since a version marker that lies is worse than none.
   var TAG_VERSION = '3.0';
+
+  // When this version was cut, ISO 8601 and taken from the same header line by
+  // the same build guard. Deliberately not the header's DD-MM-YYYY: this one is
+  // read by clients rather than by us, and a date that can be read as 10
+  // September instead of 9 October defeats the purpose of publishing it.
+  //
+  // Fixed per version and identical for every client. What it does NOT say is
+  // when this client started being served it, which is the question a client
+  // actually asks and which DEPLOYED_AT_SLOT answers.
+  var VERSION_RELEASED = '2026-10-09';
 
   // Prevent double initialisation
   var INIT_KEY = '__CONVERSIO_RUNTIME_INIT__';
@@ -193,6 +203,16 @@
   // slot means.
   var TRACKING_ID_SLOT          = '@@CONVERSIO_TRACKING_ID@@';
 
+  // The date this client's key was last pointed at a new version, substituted
+  // from their KV record by the same mechanism as the tracking ID above.
+  //
+  // Per client rather than per version, and that is the whole point of it.
+  // VERSION_RELEASED says when this bundle was built, which is the same answer
+  // for everyone and says nothing about when a particular site changed. This
+  // says when THIS site changed, which is what a client checking that nothing
+  // shipped outside an agreed window is actually asking.
+  var DEPLOYED_AT_SLOT          = '@@CONVERSIO_DEPLOYED_AT@@';
+
   var dl = window.dataLayer = window.dataLayer || [];
 
   // Memoised conversio_id for this page load, plus the two guards that keep
@@ -297,6 +317,19 @@
     return TRACKING_ID_SLOT.trim() || null;
   }
 
+  // Same three cases as readTrackingId, for the same reasons, including the
+  // '@@' test standing in for a comparison against the placeholder in full.
+  //
+  // A null here is not an error and must not be dressed up as one. The GTM
+  // paste-in copy of this file is never rewritten by any loader, and a client
+  // on the self-hosted loader whose record predates this field has nothing to
+  // substitute. Both are correctly "we cannot tell you", and inventing a date
+  // for either would be the one failure this field exists to prevent.
+  function readDeployedAt() {
+    if (DEPLOYED_AT_SLOT.indexOf('@@') !== -1) return null;
+    return DEPLOYED_AT_SLOT.trim() || null;
+  }
+
   function exposeClientSettings() {
     var settings;
     try {
@@ -311,6 +344,20 @@
       // should, and it answers for the pasted-inline copy too, the value being a
       // constant in the file rather than something the loader substitutes.
       settings.version = TAG_VERSION;
+      // The two provenance fields beside it: when this version was cut, and
+      // when this client was moved onto it. Together they let a client see on
+      // any page load what is running on their site and since when, instead of
+      // taking our word for it afterwards.
+      //
+      // Worth being straight about the limit. We control both the values and
+      // the serving, so this proves nothing to someone who has decided we are
+      // lying. What it does is make an unannounced change VISIBLE, where
+      // nothing on the page previously distinguished one version from another,
+      // and let a client record the values in their own analytics on every page
+      // load. That record is theirs, and it is the part that is actually worth
+      // anything as assurance.
+      settings.versionReleased = VERSION_RELEASED;
+      settings.deployedAt = readDeployedAt();
     } catch (e) {
       // A frozen or otherwise hostile window.conversioSettings must not take
       // the rest of the tag down with it.

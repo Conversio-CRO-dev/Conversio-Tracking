@@ -109,6 +109,13 @@ var ID_RE = /^con_[a-z2-7]{16}\.[0-9]+$/;
 // The slot the self-hosted loader substitutes the client's tracking ID into.
 var TRACKING_SLOT = '@@CONVERSIO_TRACKING_ID@@';
 
+// The slot the loader substitutes the client's deployment date into.
+var DEPLOYED_SLOT = '@@CONVERSIO_DEPLOYED_AT@@';
+
+// What this version says it is, asserted against the file rather than read from
+// it, so a version marker copied forward without being updated fails here.
+var VERSION_RELEASED = '2026-10-09';
+
 function dataEvents(dl) {
   return dl.filter(function (e) { return e && e.event === 'conversio_data'; });
 }
@@ -155,6 +162,14 @@ function runSuite(tagPath, label) {
     opts = opts || {};
     opts.tagPath = tagPath;
     opts.tagSource = source.split(TRACKING_SLOT).join(value);
+    return runTag(opts);
+  }
+
+  // The same, for the deployment date the loader patches in per client.
+  function tagWithDeployedAt(value, opts) {
+    opts = opts || {};
+    opts.tagPath = tagPath;
+    opts.tagSource = source.split(DEPLOYED_SLOT).join(value);
     return runTag(opts);
   }
 
@@ -3601,6 +3616,77 @@ function runSuite(tagPath, label) {
     check('and that is exactly why the audience never appeared',
       oldFirst.window.conversioAudience === undefined,
       JSON.stringify(oldFirst.window.conversioAudience));
+  })();
+
+  // 32. Provenance: when this version was cut, and when this client got it
+  //
+  // Section 31's version marker answers "what is running". These answer "since
+  // when", which is the question a client asks when checking that nothing
+  // shipped outside a window we agreed with them. The release date is a
+  // constant and identical for everyone; the deployment date is substituted per
+  // client and is the one that describes their site.
+  (function () {
+    var r = tag(consented({}));
+
+    check('the release date is exposed',
+      r.window.conversioSettings.versionReleased === VERSION_RELEASED,
+      JSON.stringify(r.window.conversioSettings.versionReleased));
+
+    // Checked against the header it is supposed to agree with, not merely
+    // against itself. build-bundle.mjs enforces the same pair at build time;
+    // this is the half that also covers the GTM file, which no build step reads.
+    var header = source.split('\n')[0].indexOf('CONVERSIO TAG') !== -1
+      ? source.split('\n')[0]
+      : source.split('\n')[1];
+    var parts = VERSION_RELEASED.split('-');
+    check('header date is the release date in DD-MM-YYYY',
+      header.indexOf('updated ' + parts[2] + '-' + parts[1] + '-' + parts[0]) !== -1, header);
+
+    // Same reasoning as the version marker: an unconsented page is exactly
+    // where someone may be asking what is running and since when.
+    check('and is reported without consent',
+      tag({}).window.conversioSettings.versionReleased === VERSION_RELEASED);
+
+    // The per-client half, which is substituted and therefore can be absent.
+    check('un-substituted deployment slot reads as not recorded',
+      r.window.conversioSettings.deployedAt === null,
+      JSON.stringify(r.window.conversioSettings.deployedAt));
+    check('placeholder text never surfaces',
+      JSON.stringify(r.window.conversioSettings).indexOf('CONVERSIO_DEPLOYED_AT') === -1,
+      JSON.stringify(r.window.conversioSettings));
+
+    var injected = tagWithDeployedAt('2026-10-07', consented({}));
+    check('substituted deployment date is exposed',
+      injected.window.conversioSettings.deployedAt === '2026-10-07',
+      JSON.stringify(injected.window.conversioSettings.deployedAt));
+
+    // What the loader substitutes for a client with no deployedAt, and what the
+    // Worker substitutes when it refuses a malformed one. Both must read as
+    // "we cannot tell you" rather than becoming a date.
+    check('empty substitution reads as not recorded',
+      tagWithDeployedAt('', consented({})).window.conversioSettings.deployedAt === null);
+    check('whitespace substitution reads as not recorded',
+      tagWithDeployedAt('   ', consented({})).window.conversioSettings.deployedAt === null);
+
+    // Deliberately off the payload, for the same reason the tracking ID is.
+    var payload = dataEvents(injected.dataLayer)[0].conversio;
+    check('provenance stays off the conversio_data payload',
+      JSON.stringify(payload).indexOf('2026-10-07') === -1 &&
+      JSON.stringify(payload).indexOf(VERSION_RELEASED) === -1, JSON.stringify(payload));
+
+    // One occurrence only: the loader replaces every one, and the tag detects a
+    // raw slot by looking for '@@', so a second would break both.
+    var slotCount = source.split(DEPLOYED_SLOT).length - 1;
+    check('deployment slot appears exactly once in the shipped file',
+      slotCount === 1, 'found ' + slotCount);
+
+    // Cross-file drift: a rename on either side ships a placeholder to a client.
+    var loaderSrc = fs.readFileSync(
+      path.join(__dirname, '..', 'self-hosted', 'src', 'index.js'), 'utf8');
+    check('loader substitutes the same literal the tag declares',
+      loaderSrc.indexOf("'" + DEPLOYED_SLOT + "'") !== -1, 'loader slot constant differs');
+    check('loader actually substitutes it',
+      loaderSrc.indexOf('body.split(DEPLOYED_AT_SLOT)') !== -1, 'no substitution in the loader');
   })();
 
   return { pass: pass, fail: fail };
