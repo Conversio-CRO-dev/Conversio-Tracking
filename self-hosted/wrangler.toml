@@ -87,13 +87,28 @@ namespace_id = "1001"
 [observability]
 enabled = true
 
-# invocation_logs is true by default, so this states the default rather than
-# changing it. It is here to be found: at portfolio volume it is the setting to
-# turn off, one event per invocation being what would run past the 20M events
-# per month the paid plan includes, whereas the reason-coded logs above are
-# rare by design.
+# OFF, and for what an invocation log contains rather than how many there are.
+# Cloudflare generates one per request, not this Worker, and it carries the whole
+# request object: the visitor's IP (cf-connecting-ip, x-real-ip), latitude and
+# longitude to five decimal places, postcode district, city, region, ASN, TLS
+# fingerprints, user agent and referer. Retained seven days on the paid plan.
+#
+# None of it is read by src/index.js and none of it is needed. The monitoring is
+# the reason-coded console.log lines, which carry a reason, a 12-character key
+# fingerprint, a client name and sometimes a site hostname or bundle version: no
+# IP, no visitor identifier, nothing about a person. Those are emitted by this
+# Worker and controlled by `[observability] enabled` above, not by this setting,
+# so they survive it being off.
+#
+# It matters more than it looks for v3: an audience lookup carries the visitor's
+# conversio_id in the URL path, which an invocation log records verbatim, putting
+# a persistent pseudonymous identifier on the same line as an IP and a lat/long.
+#
+# What is lost is per-request visibility of SUCCESSFUL requests. Volume comes from
+# the GraphQL analytics API instead, which the rate-limit note above already says
+# to size off. Errors are unaffected.
 [observability.logs]
-invocation_logs = true
+invocation_logs = false
 
 [observability.traces]
 enabled = false
@@ -181,3 +196,10 @@ namespace_id = "1004"
 
 [env.staging.observability]
 enabled = true
+
+
+# Same reasoning as production. Staging sees synthetic traffic, so the stakes are
+# lower, but a fault-matrix run reproducing a real client's request logs a real
+# person's location just as readily.
+[env.staging.observability.logs]
+invocation_logs = false
