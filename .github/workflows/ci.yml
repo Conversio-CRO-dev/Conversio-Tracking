@@ -1,0 +1,92 @@
+# Runs the two checks README.md already says belong here: the behavioural test
+# suites, and build-bundle's --check.
+#
+# Both discover what to run rather than listing it. The repo gains a test file
+# and a bundle per tag version, and a hardcoded list that someone forgets to
+# extend is the failure this is supposed to prevent: a new version would merge
+# with nothing run against it and a green tick saying otherwise.
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # No package.json, no dependencies: the suites are plain node scripts and
+      # the tag itself is dependency-free by design. Nothing to install.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      # Every suite runs even after one fails, so a PR shows all the damage at
+      # once rather than one suite per push. Older versions keep their suites
+      # and are worth keeping green while any client is still pinned to them.
+      - name: Run every test suite
+        run: |
+          failed=0
+          ran=0
+          for f in test/*.test.js; do
+            ran=$((ran + 1))
+            echo "::group::$f"
+            if node "$f"; then
+              echo "ok"
+            else
+              echo "::error file=$f::test suite failed"
+              failed=1
+            fi
+            echo "::endgroup::"
+          done
+          if [ "$ran" -eq 0 ]; then
+            echo "::error::no test suites were found under test/"
+            exit 1
+          fi
+          echo "ran $ran suite(s)"
+          exit $failed
+
+      # A stale bundle is the failure that reaches clients: the bytes a visitor
+      # downloads stop being the bytes the suite above just passed against.
+      #
+      # Only versions whose GTM source defines TAG_VERSION can be checked.
+      # build-bundle derives the released date from the header and requires the
+      # two to agree, and that constant was introduced in 2.6.4, so every
+      # earlier bundle fails the check for want of it rather than for being
+      # stale. Those versions are frozen anyway: regenerating a bundle clients
+      # are pinned to is itself a live-traffic change.
+      - name: Check every built bundle is in step with its source
+        working-directory: self-hosted
+        run: |
+          failed=0
+          checked=0
+          for f in ../conversio_runtime_tag_v*.js; do
+            v=$(basename "$f" | sed 's/^conversio_runtime_tag_v//; s/\.js$//')
+            if ! grep -q 'TAG_VERSION' "$f"; then
+              echo "skipping $v (predates TAG_VERSION)"
+              continue
+            fi
+            checked=$((checked + 1))
+            if ! node scripts/build-bundle.mjs "$v" --check; then
+              echo "::error::runtime-tag.$v.js is stale. Rebuild it: cd self-hosted && node scripts/build-bundle.mjs $v"
+              failed=1
+            fi
+          done
+          # Zero checked means the discovery rule stopped matching, not that
+          # everything is fine. Fail loudly rather than pass having done nothing.
+          if [ "$checked" -eq 0 ]; then
+            echo "::error::no bundles were checked. Has TAG_VERSION been renamed?"
+            exit 1
+          fi
+          echo "checked $checked bundle(s)"
+          exit $failed
