@@ -3,3 +3,8 @@
 node_modules/
 .env
 .claude/
+
+# The BigQuery export the audiences runbook tells you to write here
+# (self-hosted/README.md, "Loading audience data"). One row per visitor:
+# conversio_id, audience codes, timestamp. Never commit it.
+rows.json
