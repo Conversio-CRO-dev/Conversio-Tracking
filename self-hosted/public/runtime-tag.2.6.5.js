@@ -335,7 +335,7 @@
   }
 
   function clearEventBuffer(stream) {
-    saveJsonArray(stream.keyEventBuffer, []);
+    removeStoredKey(stream.keyEventBuffer);
   }
 
   function isEmissionEnabled(stream) {
@@ -666,7 +666,7 @@
   }
 
   function clearPendingData() {
-    saveJsonObject(KEY_DATA_PENDING, {});
+    removeStoredKey(KEY_DATA_PENDING);
   }
 
   function isPendingDataPayload(pending) {

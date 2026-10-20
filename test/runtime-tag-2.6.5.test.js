@@ -3573,6 +3573,18 @@ function runSuite(tagPath, label) {
         String(r.session.conversioExperienceMap).indexOf('s1') !== -1 &&
           String(r.session.conversioExperienceMap).indexOf('s2') !== -1,
         String(r.session.conversioExperienceMap));
+
+      // The two transient keys are not left behind as empty values. Both fill
+      // only while the gate is shut, which is now memory, so the sessionStorage
+      // entry behind either can hold nothing but what a clear put there:
+      // promotion copies them across and the flush empties them in the same
+      // call. Their clears remove rather than write '[]' and '{}', so what is
+      // on the device afterwards is only the keys that carry something.
+      check('and the transient buffer keys are gone, not left empty',
+        !('conversioEventBuffer' in r.session) &&
+          !('conversioVitalsPending' in r.session) &&
+          !('clientEventBuffer' in r.session),
+        JSON.stringify(r.session));
       check('and the fired set stops a second flush re-reporting them',
         (function () {
           r.window.__conversioFlushEmission__();

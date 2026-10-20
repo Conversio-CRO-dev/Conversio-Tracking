@@ -581,8 +581,20 @@
     saveJsonArray(stream.keyEventBuffer, buffer);
   }
 
+  // Removed rather than written as an empty array. From 2.6.5 a buffer only
+  // ever fills while the gate is shut, which now means in memory, so the
+  // sessionStorage entry behind this key can hold nothing but the empty value a
+  // clear put there: promotion copies the buffer across on consent and the
+  // flush below empties it in the same call. Leaving '[]' on the device would
+  // be a key that is only ever a record of there being nothing to record.
+  //
+  // Safe to go straight to the device rather than through the facade because
+  // this is reached only from flushBufferedEvents, which returns early unless
+  // the gate is open. A caller that ran it with the gate shut would clear the
+  // sessionStorage entry and leave the memory buffer holding the events, so
+  // keep that ordering if this ever gains a second caller.
   function clearEventBuffer(stream) {
-    saveJsonArray(stream.keyEventBuffer, []);
+    removeStoredKey(stream.keyEventBuffer);
   }
 
   function isEmissionEnabled(stream) {
@@ -1064,8 +1076,11 @@
     dataEventBuffered = true;
   }
 
+  // Removed rather than written as an empty object, for the reason
+  // clearEventBuffer is, and reached only from flushPendingData, which gates on
+  // the same thing flushBufferedEvents does.
   function clearPendingData() {
-    saveJsonObject(KEY_DATA_PENDING, {});
+    removeStoredKey(KEY_DATA_PENDING);
   }
 
   function isPendingDataPayload(pending) {
