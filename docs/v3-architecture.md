@@ -327,6 +327,31 @@ visit is the client's own processing under their own consent framework, not ours
 but the two frameworks need to agree. A question for whoever owns the privacy
 posture, not an engineering one.
 
+What changed in 3.1 is the other half of the question, raised by a client during
+rollout: what the tag stores *before* consent. Up to 3.0 everything the gate was
+holding was buffered into `sessionStorage` and released when consent arrived.
+That buffer carried no `conversio_id`, which answers a data protection question
+and not the one that applies: PECR reg 6, and ePrivacy Article 5(3) behind it,
+regulate the act of writing to a device or reading what is already there,
+whether or not what is written identifies anyone.
+
+From 3.1 that buffer is held in memory and nothing reaches `sessionStorage` or
+`localStorage` until the visitor consents. The cost is the page loads before the
+one where consent arrives: memory does not survive a navigation, so a visitor
+who sees an experience on page one and accepts on page four is reported from
+page four. There is no way to keep the earlier pages that does not involve
+writing to the device.
+
+Withdrawal is the mirror, and 3.1 widens what 3.0 did. 3.0 removed the
+`_cvo_aud` cookie alone; 3.1 removes `conversio_id`, the session state and the
+in-memory buffer with it, leaving both stores empty. The audience cookie is
+still the one piece of this that describes the person rather than the session,
+so it was always the one that had to go; the rest now goes with it.
+
+Neither change touches the four planes above. The cookie is read and written
+behind the emission gate exactly as it was, so the audience layer needs nothing
+from the buffer and sees no difference.
+
 ---
 
 ## 7. Failure modes, and what each looks like
