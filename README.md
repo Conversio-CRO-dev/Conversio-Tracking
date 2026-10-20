@@ -122,6 +122,81 @@ tag initialised.
 `window.__conversioEnableEmission__()` and its two siblings stay and are
 unchanged, so a client already calling them keeps working exactly as before.
 
+### What is stored before consent (2.6.5)
+
+Nothing, on either store.
+
+Up to 2.6.4 the tag buffered what it was holding into `sessionStorage` while the
+gate was shut, and released it when consent arrived. That buffer carried no
+`conversio_id` and nothing that identified anyone, which answers a data
+protection question but not the one that actually applies: PECR reg 6, and
+ePrivacy Article 5(3) behind it, regulate the act of writing to a visitor's
+device or reading what is already there, whether or not what is written
+identifies them. The exemptions are for storage strictly necessary to transmit a
+communication or to provide a service the user asked for, and measurement
+reaches neither.
+
+So from 2.6.5 the buffer is held in memory instead. A visitor who has not
+answered the banner leaves `sessionStorage` and `localStorage` untouched, and a
+visitor who never answers it leaves nothing behind at all. On consent the buffer
+is promoted to `sessionStorage` and then flushed, so everything from the grant
+onwards behaves exactly as 2.6.4 did.
+
+The one key still written on an unconsented visitor is
+`conversioEmissionEnabled`, and only at the moment they decide: it is reached
+only from the enable and disable controls, so what it records is the consent
+decision itself and nothing about what the visitor did. Before any signal
+arrives the key does not exist, so a client auditing storage on a page where the
+banner is unanswered finds it empty.
+
+**What this costs** is the page loads before the one where consent arrives.
+Memory does not survive a navigation, so a visitor who sees an experience on
+page one, leaves the banner alone and accepts on page four is reported from page
+four; 2.6.4 released all four. There is no way to keep the earlier pages that
+does not involve writing to the device, so this is a deliberate loss rather than
+a gap to close later. How much it costs in practice depends on how quickly a
+client's visitors answer the banner, which their consent platform can report and
+this tag cannot.
+
+### What happens on withdrawal (2.6.5)
+
+The mirror of the above, and the question a reviewer asks straight after it.
+
+Up to 2.6.4 a withdrawal shut the gate and left everything already written where
+it was. New data stopped, and `getConversioId` sits behind the gate so the id
+was never read or re-minted, but the value stayed on the device. 3.0 removes its
+`_cvo_aud` audience cookie and nothing else, and says so in its own comment.
+
+From 2.6.5, `__conversioDisableEmission__` (or `denied` on the queue) removes
+what consent paid for before shutting the gate:
+
+| | after a withdrawal |
+|---|---|
+| `conversio_id` (localStorage) | removed |
+| experience map, segment lists, fired set, event buffer | removed |
+| `conversio_vitals`, `conversioVitalsPending` | removed |
+| the in-memory buffer | emptied |
+| `conversioEmissionEnabled` / `clientEmissionEnabled` | kept, as `'false'` |
+
+`conversio_id` goes first because it is the only thing this tag stores that is
+genuinely persistent and cross-session: everything else dies with the session,
+and that one outlives the tab. The two emission keys are kept deliberately. They
+are the record of the decision itself, and removing them would read as 'never
+asked' on the next page load, which is the one state that would let the tag
+start collecting again.
+
+A visitor who refuses without ever having granted has nothing on the device to
+remove, and the memory buffer is emptied too, so a later grant releases nothing
+that predates the refusal rather than resurrecting it.
+
+The clear writes to `sessionStorage` and `localStorage` directly rather than
+through the pre-consent facade, so it does not depend on running before the gate
+closes.
+
+One thing genuinely is unchanged and gets asked: a browser with `sessionStorage`
+blocked outright reports nothing even after consenting, exactly as before, since
+the gate has nowhere to record the grant.
+
 The tag a client actually pastes for this is
 [`conversio_session_initiator_v1.5.js`](conversio_session_initiator_v1.5.js), fired
 on their own consent trigger. It pushes as above and then calls the control behind a

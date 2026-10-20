@@ -20,6 +20,12 @@ function makeStore(initial, opts) {
     setItem: function (k, v) {
       if (opts.throwOnWrite) throw new Error('storage blocked');
       data[k] = String(v);
+    },
+    // Real storage has it and 2.6.5 uses it to clear on a consent withdrawal,
+    // so the stub needs it or that path throws here and nowhere else.
+    removeItem: function (k) {
+      if (opts.throwOnWrite) throw new Error('storage blocked');
+      delete data[k];
     }
   };
 }
@@ -89,6 +95,8 @@ var VITALS_FIXTURE = [
 //   localStorage: store or false (absent) or {throwOnRead/throwOnWrite}
 //   emissionEnabled: bool
 //   sessionInitial: seed object for sessionStorage
+//   sessionStorage: store or false (absent), as localStorage above
+//   sessionStorageOpts: {throwOnRead/throwOnWrite}, as localStorageOpts above
 //   localInitial: seed object for localStorage
 //   dataLayerInitial: items to place on the dataLayer before the tag runs, so
 //     the sweep of what is already there is exercised rather than only the
@@ -122,7 +130,14 @@ function runTag(opts) {
   var sessionInitial = Object.assign({}, opts.sessionInitial || {});
   if (opts.emissionEnabled) sessionInitial.conversioEmissionEnabled = 'true';
 
-  var sessionStore = makeStore(sessionInitial);
+  // Absent altogether where a test asks for it, the way localStorage already
+  // could be. Worth being able to produce from 2.6.5 on: the pre-consent buffer
+  // sits in front of every stored read the tag makes, and a browser with no
+  // sessionStorage is the case where the facade has to fall through to nothing
+  // rather than throw.
+  var sessionStore = opts.sessionStorage === false
+    ? null
+    : makeStore(sessionInitial, opts.sessionStorageOpts);
   var localStore = opts.localStorage === false
     ? null
     : makeStore(opts.localInitial, opts.localStorageOpts);
@@ -214,7 +229,7 @@ function runTag(opts) {
 
   var window = {
     dataLayer: dataLayer,
-    sessionStorage: sessionStore,
+    sessionStorage: sessionStore || undefined,
     performance: performance,
     Uint8Array: Uint8Array,
     crypto: { getRandomValues: crypto.randomFillSync },
@@ -390,7 +405,7 @@ function runTag(opts) {
     cookieWrites: cookieWrites,
     xhrRequests: xhrRequests,
     dataLayer: dataLayer,
-    session: sessionStore._data,
+    session: sessionStore ? sessionStore._data : null,
     local: localStore ? localStore._data : null,
     window: window,
     drain: drain,
