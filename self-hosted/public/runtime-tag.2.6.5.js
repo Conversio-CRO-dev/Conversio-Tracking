@@ -349,7 +349,11 @@
     if (!window.sessionStorage) return;
 
     for (i = 0; i < STREAMS.length; i++) {
-      window.sessionStorage.setItem(STREAMS[i].keyEmissionEnabled, value ? 'true' : 'false');
+      if (value) {
+        window.sessionStorage.setItem(STREAMS[i].keyEmissionEnabled, 'true');
+      } else {
+        removeStoredKey(STREAMS[i].keyEmissionEnabled);
+      }
     }
   }
 

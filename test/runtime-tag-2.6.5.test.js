@@ -1809,8 +1809,8 @@ function runSuite(tagPath, label) {
     // emitted, exactly as ours would be.
     gated.window.__conversioDisableEmission__();
     check('one disable call closes both gates',
-      gated.session.conversioEmissionEnabled === 'false' &&
-        gated.session.clientEmissionEnabled === 'false',
+      !('conversioEmissionEnabled' in gated.session) &&
+        !('clientEmissionEnabled' in gated.session),
       JSON.stringify(gated.session));
     pushClientEvent(gated, 'ce2');
     check('a client event pushed after consent is withdrawn is not emitted',
@@ -3247,12 +3247,22 @@ function runSuite(tagPath, label) {
     ['enable', 'enabled', 'grant', 'granted'].forEach(function (word) {
       check("'" + word + "' is a grant", gate(queued(PUSH + "('" + word + "');")) === 'true');
     });
+    // From 2.6.5 a withdrawal REMOVES the key rather than writing 'false' into
+    // it, so an applied withdrawal and a command nobody recognised both leave
+    // the gate unset and the old sentinel can no longer tell them apart. Each
+    // withdrawal below therefore grants first and asserts the transition, which
+    // is the better discriminator anyway: it reads the state change rather than
+    // a value that only ever existed to be looked at. Where there is no grant
+    // to undo, the push's own return value says whether the command was
+    // recognised, as it already does for the unrecognised ones.
     ['disable', 'disabled', 'deny', 'denied'].forEach(function (word) {
       check("'" + word + "' is a withdrawal",
-        gate(queued(PUSH + "('enable');" + PUSH + "('" + word + "');")) === 'false');
+        gate(queued(PUSH + "('enable');" + PUSH + "('" + word + "');")) === undefined,
+        String(gate(queued(PUSH + "('enable');" + PUSH + "('" + word + "');"))));
     });
     check('true is a grant', gate(queued(PUSH + '(true);')) === 'true');
-    check('false is a withdrawal', gate(queued(PUSH + "('enable');" + PUSH + '(false);')) === 'false');
+    check('false is a withdrawal',
+      gate(queued(PUSH + "('enable');" + PUSH + '(false);')) === undefined);
     check('the words are case-insensitive, as a GTM variable is not case-stable',
       gate(queued(PUSH + "('GRANTED');")) === 'true');
     check('and mixed case reads the same',
@@ -3276,17 +3286,23 @@ function runSuite(tagPath, label) {
 
     // Order, which decides what a platform that changes its mind lands on.
     check('a grant then a withdrawal lands on the withdrawal',
-      gate(queued(PUSH + "('enable');" + PUSH + "('deny');")) === 'false');
+      gate(queued(PUSH + "('enable');" + PUSH + "('deny');")) === undefined);
     check('a withdrawal then a grant lands on the grant',
       gate(queued(PUSH + "('deny');" + PUSH + "('enable');")) === 'true');
-    check('a withdrawal alone writes the shut state rather than leaving it unset',
-      gate(queued(PUSH + "('deny');")) === 'false');
+    // A bare withdrawal has no grant to undo and leaves the gate unset, which
+    // is also what a tag that did nothing leaves. The push's return value is
+    // what separates the two: the command was recognised and applied.
+    check('a withdrawal alone is recognised, and leaves the gate shut',
+      (function () {
+        var r = queued('');
+        return pushLive(r, 'deny') === true && gate(r) === undefined;
+      })());
 
     // One bad item is not the rest of them.
     check('a malformed item is stepped over and the good one behind it still applies',
       gate(queued(PUSH + '({});' + PUSH + "('enable');")) === 'true');
     check('and a malformed item ahead of a withdrawal does not cost it either',
-      gate(queued(PUSH + '(function () {});' + PUSH + "('deny');")) === 'false');
+      gate(queued(PUSH + "('enable');" + PUSH + '(function () {});' + PUSH + "('deny');")) === undefined);
     check('several malformed items do not end the drain',
       gate(queued(PUSH + '(null);' + PUSH + '(undefined);' + PUSH + '([]);' + PUSH + "('enable');")) === 'true');
 
@@ -3361,7 +3377,7 @@ function runSuite(tagPath, label) {
       (function () {
         var r = queued(PUSH + "('enable');");
         pushLive(r, 'deny');
-        return gate(r) === 'false';
+        return gate(r) === undefined;
       })());
   })();
 
@@ -3666,10 +3682,8 @@ function runSuite(tagPath, label) {
 
       r.window.__conversioDisableEmission__();
       r.drain();
-      check('a refusal is recorded, and records nothing else',
-        r.session.conversioEmissionEnabled === 'false' &&
-          r.session.clientEmissionEnabled === 'false' &&
-          Object.keys(r.session).length === 2,
+      check('and a refusal leaves the device empty, not marked',
+        Object.keys(r.session).length === 0 && Object.keys(r.local).length === 0,
         JSON.stringify(r.session));
       check('and a refused visitor still emits nothing',
         emitsOf(r, 'conversio_experience_session').length === 0 &&
@@ -3796,17 +3810,17 @@ function runSuite(tagPath, label) {
           !r.session.conversioEventBuffer && !r.session.conversio_vitals &&
           !r.session.conversioVitalsPending,
         JSON.stringify(r.session));
-      // What survives, exactly. The clear goes straight to the two stores
-      // rather than through the facade, so it does not depend on running
-      // before the gate closes; what it does depend on is the key list in
-      // clearStoredState staying in step with the stream descriptors, and a
-      // key added to a stream but not to the clear shows up here as a third
-      // entry rather than being noticed by nobody.
-      check('leaving only the record of the decision itself',
-        r.session.conversioEmissionEnabled === 'false' &&
-          r.session.clientEmissionEnabled === 'false' &&
-          Object.keys(r.session).length === 2,
-        JSON.stringify(r.session));
+      // Nothing survives, including the two emission keys: a withdrawal
+      // removes them rather than writing 'false', isEmissionEnabled testing
+      // for 'true' and the gate's default being shut, so the keys would buy
+      // nothing in exchange for being left on the device of someone who had
+      // just refused.
+      //
+      // This also guards the key list in clearStoredState staying in step with
+      // the stream descriptors: a key added to a stream but not to the clear
+      // shows up here as a surviving entry rather than being noticed by nobody.
+      check('leaving the device empty outright',
+        Object.keys(r.session).length === 0, JSON.stringify(r.session));
     })();
 
     // A visitor who refuses without ever having granted: nothing of theirs is
@@ -3875,7 +3889,7 @@ function runSuite(tagPath, label) {
       }
 
       check('a localStorage that throws does not break the withdrawal',
-        !threw && !!r && r.session.conversioEmissionEnabled === 'false',
+        !threw && !!r && Object.keys(r.session).length === 0,
         threw ? 'threw' : JSON.stringify(r && r.session));
     })();
 
@@ -3894,7 +3908,7 @@ function runSuite(tagPath, label) {
       }
 
       check('nor does localStorage being absent altogether',
-        !threw && !!r && r.session.conversioEmissionEnabled === 'false',
+        !threw && !!r && Object.keys(r.session).length === 0,
         threw ? 'threw' : JSON.stringify(r && r.session));
     })();
   })();

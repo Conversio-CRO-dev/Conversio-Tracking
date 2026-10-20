@@ -608,18 +608,37 @@
   // through a facade whose choice of store depends on reading it would also be
   // circular.
   //
-  // Dropping it and treating its absence as 'false' has been raised, and would
-  // work, at the cost of making every page load depend on the consent platform
-  // re-signalling: today a signal missed on page three costs nothing because
-  // the key still reads true, and without it that page reports nothing at all.
-  // See promotePreConsentStore, which is written to survive that change.
+  // Dropping the granted key too, and treating its absence as 'false', has been
+  // raised and would work, at the cost of making every page load depend on the
+  // consent platform re-signalling: today a signal missed on page three costs
+  // nothing because the key still reads true, and without it that page reports
+  // nothing at all. See promotePreConsentStore, which is written to survive
+  // that change. That is a different question from the refusal below, where
+  // there is nothing to lose by removing the key, the gate being shut by
+  // default either way.
+  // A grant writes the key; a withdrawal removes it rather than writing
+  // 'false'. isEmissionEnabled is the only reader and tests for the string
+  // 'true', so an absent key and a 'false' one are the same shut gate to
+  // everything in this tag: the gate's default is shut, and the tag needs no
+  // record of a refusal in order to honour one. Writing 'false' would leave two
+  // keys on the device of a visitor who had just said no, to no end, which is
+  // the opposite of what the rest of this version is for. The platform that
+  // asked the question keeps the record of the answer; this tag does not need a
+  // second copy of it.
+  //
+  // So 'true' is the only value this key ever holds, and the only write this
+  // tag makes to an unconsented visitor's device is the removal below.
   function setEmissionEnabled(value) {
     var i;
 
     if (!window.sessionStorage) return;
 
     for (i = 0; i < STREAMS.length; i++) {
-      window.sessionStorage.setItem(STREAMS[i].keyEmissionEnabled, value ? 'true' : 'false');
+      if (value) {
+        window.sessionStorage.setItem(STREAMS[i].keyEmissionEnabled, 'true');
+      } else {
+        removeStoredKey(STREAMS[i].keyEmissionEnabled);
+      }
     }
   }
 
@@ -1266,10 +1285,13 @@
   // what is there whichever way the gate reads and in whichever order the two
   // are called.
   //
-  // The emission flag itself is deliberately not cleared: it is the record of
-  // this very decision, and removing it would read as 'never asked' on the next
-  // page load, which is the one state that would let the tag start collecting
-  // again.
+  // setEmissionEnabled below removes the two emission keys rather than writing
+  // 'false' into them, so a withdrawal leaves sessionStorage empty outright.
+  // An earlier draft of this version kept them, on the reasoning that they were
+  // the record of the decision and that losing them would read as 'never asked'
+  // and let collection restart. That was wrong: 'never asked' is a shut gate
+  // too, so the two states are indistinguishable to every reader here, and the
+  // keys bought nothing in exchange for being left behind.
   function disableEmission() {
     clearStoredState();
     setEmissionEnabled(false);

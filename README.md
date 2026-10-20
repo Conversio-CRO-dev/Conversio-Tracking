@@ -142,12 +142,11 @@ visitor who never answers it leaves nothing behind at all. On consent the buffer
 is promoted to `sessionStorage` and then flushed, so everything from the grant
 onwards behaves exactly as 2.6.4 did.
 
-The one key still written on an unconsented visitor is
-`conversioEmissionEnabled`, and only at the moment they decide: it is reached
-only from the enable and disable controls, so what it records is the consent
-decision itself and nothing about what the visitor did. Before any signal
-arrives the key does not exist, so a client auditing storage on a page where the
-banner is unanswered finds it empty.
+No key is written on an unconsented visitor at all. `conversioEmissionEnabled`
+is reached only from the enable and disable controls, and from 2.6.5 only a
+grant writes it: a withdrawal removes it instead. So a client auditing storage
+on a page where the banner is unanswered finds it empty, and so does one
+auditing a visitor who answered no. See the withdrawal section below.
 
 **What this costs** is the page loads before the one where consent arrives.
 Memory does not survive a navigation, so a visitor who sees an experience on
@@ -176,14 +175,23 @@ what consent paid for before shutting the gate:
 | experience map, segment lists, fired set, event buffer | removed |
 | `conversio_vitals`, `conversioVitalsPending` | removed |
 | the in-memory buffer | emptied |
-| `conversioEmissionEnabled` / `clientEmissionEnabled` | kept, as `'false'` |
+| `conversioEmissionEnabled` / `clientEmissionEnabled` | removed |
+
+Which leaves `sessionStorage` and `localStorage` empty outright, exactly as they
+were before the visitor ever answered.
 
 `conversio_id` goes first because it is the only thing this tag stores that is
 genuinely persistent and cross-session: everything else dies with the session,
-and that one outlives the tab. The two emission keys are kept deliberately. They
-are the record of the decision itself, and removing them would read as 'never
-asked' on the next page load, which is the one state that would let the tag
-start collecting again.
+and that one outlives the tab.
+
+The two emission keys are removed rather than written as `'false'`.
+`isEmissionEnabled` is their only reader and it tests for the string `'true'`,
+so an absent key and a `'false'` one are the same shut gate: the gate's default
+is shut, and the tag needs no record of a refusal in order to honour one. The
+platform that asked the question keeps the record of the answer, and a second
+copy on the device of someone who has just said no buys nothing. A grant is
+still written, since that is what keeps the gate open across a session, and it
+is written after consent rather than before it.
 
 A visitor who refuses without ever having granted has nothing on the device to
 remove, and the memory buffer is emptied too, so a later grant releases nothing
